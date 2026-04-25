@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     reflect_parser.add_argument("--bug-id", required=True)
     reflect_parser.add_argument("--result", required=True, choices=["pass", "fail"])
 
+    feishu_parser = subparsers.add_parser("feishu-review")
+    feishu_parser.add_argument("--payload", required=True)
+
     return parser
 
 
@@ -91,6 +94,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "reflect":
         print(reflection.reflect(args.bug_id, args.result))
+        return 0
+    if args.command == "feishu-review":
+        import json
+
+        payload = json.loads(args.payload)
+        print(reflection.handle_review_event(payload))
         return 0
 
     parser.error("unknown command")
