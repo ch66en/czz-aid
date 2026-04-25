@@ -91,7 +91,7 @@ class ReflectionSubAgent:
             return ReflectionResult(False, "human_fix_branch is required for review_failed")
         session = self._load_session(review_event.task_id)
         bug_event = self._load_bug_event(review_event.task_id, session)
-        base_branch = str(session.get("base_branch", self.config.project.base_branch))
+        base_branch = str(session.get("base_branch", getattr(self.config.project, "base_branch", self.config.project.default_branch)))
         agent_branch = str(session.get("agent_branch", "")).strip()
         if not agent_branch:
             return ReflectionResult(False, "agent_branch is missing in session")
@@ -138,7 +138,7 @@ class ReflectionSubAgent:
 
     def _build_summary_prompt(self, *, mode: str, bug_event: BugEvent, review_event: ReviewEvent, trace_full: str, trace_frames: Any, tool_calls: str, agent_patch: str, compile_result: Any, test_result: Any, extra: dict[str, Any] | None = None) -> str:
         payload = {"mode": mode, "bug_event": bug_event.model_dump(), "review_event": review_event.model_dump(), "trace_full": trace_full, "trace_frames": trace_frames, "tool_calls": tool_calls, "agent_patch": agent_patch, "compile_result": compile_result, "test_result": test_result, "extra": extra or {}}
-        return "你是一个只负责总结的反思模型，不负责选择工具。\n请基于输入内容输出结构化总结，覆盖适用场景、典型信号、有用步骤、多余步骤、推荐步骤、避免事项。\n如果是 review_failed，请重点比较 Agent 修复与人工修复的差异。\n" + f"INPUT: {json.dumps(payload, ensure_ascii=False)}"
+        return "你是一个只负责总结的反思模型，不负责选择工具。\n请基于输入内容输出结构化总结，覆盖适用场景、典型信号、有用步骤、多余步骤、推荐步骤、避免事项。\n如果是 review_failed，请重点比较 Agent 修复与人工修复的差异。\n" + f"INPUT: {json.dumps(payload, ensure_ascii=False, default=str)}"
 
     def _ask_llm(self, prompt: str) -> str:
         if self.llm_client is None:
