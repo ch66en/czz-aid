@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.models import ToolResult, ToolSpec
-from agent.tools.base import BaseTool
+from agent.tools.base import BaseTool, PermissionType
 
 
 class EditCodeTool(BaseTool):
@@ -15,7 +15,12 @@ class EditCodeTool(BaseTool):
     @property
     def spec(self) -> ToolSpec:
         """返回代码编辑工具的规格说明。"""
-        return ToolSpec(name="edit_code", description="Write code to a file", requires_approval=True)
+        return ToolSpec(name="edit_code", description="Write code to a file", input_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}, permission=PermissionType.WORKSPACE_WRITE.value, executor="local")
+
+    @property
+    def permission(self) -> PermissionType:
+        """返回代码编辑工具所需权限。"""
+        return PermissionType.WORKSPACE_WRITE
 
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """根据路径和内容参数写入文件。"""
@@ -24,12 +29,4 @@ class EditCodeTool(BaseTool):
         content = str(data.get("content", ""))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        return ToolResult(
-            tool="edit_code",
-            success=True,
-            exit_code=0,
-            stdout_summary=str(path),
-            stderr_summary="",
-            data={"path": str(path)},
-            artifacts=[str(path)],
-        )
+        return ToolResult(tool="edit_code", success=True, exit_code=0, stdout_summary=str(path), stderr_summary="", data={"path": str(path)}, artifacts=[str(path)])

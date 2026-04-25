@@ -21,11 +21,13 @@ class TaskStatus(str, Enum):
 
 
 class ToolSpec(BaseModel):
-    """描述工具的名称、能力说明与权限要求。"""
+    """描述工具的名称、输入、权限与执行器信息。"""
 
     name: str
     description: str
-    requires_approval: bool = False
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    permission: str = "READ_ONLY"
+    executor: str = "local"
 
 
 class ProjectConfig(BaseModel):
@@ -50,6 +52,16 @@ class BugEvent(BaseModel):
     request_method: str = ""
     top_business_frame: str = ""
     fingerprint: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class BugReport(BaseModel):
+    """表示外部系统输入的原始缺陷报告。"""
+
+    bug_id: str
+    title: str = ""
+    content: str = ""
+    source: str = "unknown"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

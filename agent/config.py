@@ -16,11 +16,14 @@ class ProjectConfig(BaseModel):
     root: str = "."
     language: str = "java"
     default_branch: str = "main"
+    compile_command: str = "mvn compile"
+    test_command: str = "mvn test"
 
 
 class LLMConfig(BaseModel):
     """定义大模型服务接入配置。"""
 
+    provider: str = "doubao"
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-5.2-codex-compatible"
@@ -60,6 +63,7 @@ class AgentConfig(BaseModel):
     reflection_enabled: bool = True
     review_required: bool = True
     watch_paths: list[str] = Field(default_factory=lambda: ["./logs"])
+    debug: bool = False
 
 
 class AppConfig(BaseModel):

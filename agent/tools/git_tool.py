@@ -16,6 +16,11 @@ class GitTool(BaseTool):
         """返回 Git 工具的规格说明。"""
         return ToolSpec(name="git_tool", description="Minimal git helper", requires_approval=True)
 
+    @property
+    def permission(self) -> str:
+        """返回 Git 工具所需权限。"""
+        return "VCS_WRITE"
+
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """返回 Git 工具已就绪的占位结果。"""
         return ToolResult(

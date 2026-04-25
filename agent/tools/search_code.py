@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.models import ToolResult, ToolSpec
-from agent.tools.base import BaseTool
+from agent.tools.base import BaseTool, PermissionType
 
 
 class SearchCodeTool(BaseTool):
@@ -15,7 +15,12 @@ class SearchCodeTool(BaseTool):
     @property
     def spec(self) -> ToolSpec:
         """返回代码搜索工具的规格说明。"""
-        return ToolSpec(name="search_code", description="Search text in code files")
+        return ToolSpec(name="search_code", description="Search text in code files", input_schema={"type": "object", "properties": {"root": {"type": "string"}, "keyword": {"type": "string"}}, "required": ["keyword"]}, permission=PermissionType.READ_ONLY.value, executor="local")
+
+    @property
+    def permission(self) -> PermissionType:
+        """返回代码搜索工具所需权限。"""
+        return PermissionType.READ_ONLY
 
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """遍历目录并收集包含目标关键字的文件路径。"""
@@ -25,17 +30,8 @@ class SearchCodeTool(BaseTool):
         matches: list[str] = []
         for path in root.rglob("*.py"):
             try:
-                # 文件可能被占用或不可读，因此这里容忍单文件失败。
                 if keyword and keyword in path.read_text(encoding="utf-8"):
                     matches.append(str(path))
             except OSError:
                 continue
-        return ToolResult(
-            tool="search_code",
-            success=True,
-            exit_code=0,
-            stdout_summary=f"found {len(matches)} file(s)",
-            stderr_summary="",
-            data={"keyword": keyword, "matches": matches},
-            artifacts=matches,
-        )
+        return ToolResult(tool="search_code", success=True, exit_code=0, stdout_summary=f"found {len(matches)} file(s)", stderr_summary="", data={"keyword": keyword, "matches": matches}, artifacts=matches)
