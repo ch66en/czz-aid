@@ -1,0 +1,16 @@
+app:
+  name: auto-fix-agent
+  env: dev
+  workspace: .
+llm:
+  base_url: https://api.openai.com/v1
+  api_key: your-api-key
+  model: gpt-5.2-codex-compatible
+storage:
+  sqlite_path: ./data/agent.db
+integrations:
+  feishu_webhook: ""
+  gitee_token: ""
+watch:
+  paths:
+    - ./logs

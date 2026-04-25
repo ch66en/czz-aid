@@ -1,0 +1,11 @@
+{
+  "include": [
+    "agent",
+    "tests"
+  ],
+  "extraPaths": [
+    "."
+  ],
+  "venvPath": "..",
+  "venv": "czz-aid-venv"
+}
