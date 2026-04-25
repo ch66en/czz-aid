@@ -66,9 +66,9 @@ class IngestionPipeline:
                 )
             ),
         )
-        self._save_bug_event(bug_event)
         duplicate = self.dedup_engine.is_duplicate(bug_event.fingerprint)
         if not duplicate:
+            self._save_bug_event(bug_event)
             self.dedup_engine.mark_seen(bug_event.fingerprint)
         session_snapshot = self._load_session_snapshot(bug_id)
         repair_result = None

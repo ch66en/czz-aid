@@ -151,6 +151,7 @@ class RepairAgent:
                         last_result = test_result
                         break
                     pr_url = self._create_pr(task, bug_event)
+                    history.append({"tool": "CreatePR", "result": {"pr_url": pr_url, "status": "passed"}})
                     task.pr_url = pr_url
                     task.status = TaskStatus.PASSED
                     self.task_manager.update_status(bug_id, TaskStatus.PASSED)
@@ -160,6 +161,7 @@ class RepairAgent:
                 tool = self.registry.get(tool_name.lower()) or self.registry.get(tool_name)
                 if tool is None:
                     last_result = ToolResult(tool=tool_name or "unknown", success=False, exit_code=1, stdout_summary="", stderr_summary=f"tool not found: {tool_name}", data={}, artifacts=[])
+                    history.append({"tool": tool_name or "unknown", "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
                     self._save_session(bug_id, session)
                     continue
@@ -167,6 +169,7 @@ class RepairAgent:
                 allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), action.get("arguments", {}))
                 if not allowed:
                     last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={}, artifacts=[])
+                    history.append({"tool": tool.spec.name, "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
                     self._save_session(bug_id, session)
                     continue
