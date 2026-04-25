@@ -18,7 +18,9 @@ from agent.storage.skill_store import SkillStore
 from agent.tools.base import ToolContext
 from agent.tools.compile_tool import RunCompileTool
 from agent.tools.edit_code import EditCodeTool
+from agent.tools.gitee_tool import GiteeTool
 from agent.tools.git_diff import GitDiffTool
+from agent.tools.git_tool import GitTool
 from agent.tools.read_code import ReadCodeTool
 from agent.tools.run_command import RunCommandTool
 from agent.tools.search_code import SearchCodeTool
@@ -70,8 +72,10 @@ class RepairAgent:
             EditCodeTool(),
             RunCommandTool(self.config),
             GitDiffTool(),
+            GitTool(self.config.workspace),
             RunCompileTool(self.config),
             RunTestTool(self.config),
+            GiteeTool(self.config.gitee.owner, self.config.gitee.repo, self.config.gitee.base_url),
         ]:
             if self.registry.get(tool.spec.name) is None:
                 self.registry.register(tool)
@@ -150,11 +154,11 @@ class RepairAgent:
                     if not test_result.success:
                         last_result = test_result
                         break
-                    pr_url = self._create_pr(task, bug_event)
-                    task.pr_url = pr_url
+                    pr_result = self._create_pr(task, bug_event)
+                    task.pr_url = pr_result.data.get("pr_url", "")
                     task.status = TaskStatus.PASSED
                     self.task_manager.update_status(bug_id, TaskStatus.PASSED)
-                    self._save_session(bug_id, {**session, "pr_url": pr_url, "status": "passed"})
+                    self._save_session(bug_id, {**session, "pr_url": task.pr_url, "status": "passed", "pr_result": pr_result.model_dump()})
                     return RepairRunResult(True, "passed", "repair succeeded", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
 
                 tool = self.registry.get(tool_name.lower()) or self.registry.get(tool_name)
@@ -178,11 +182,8 @@ class RepairAgent:
                 self._save_session(bug_id, session)
                 if tool.spec.name == "edit_code" and result.success:
                     modified = True
-
-                # 继续在当前轮次中等待 finish_patch，直到进入编译/测试阶段。
                 continue
 
-            # 当前轮次结束，但测试失败后才算一轮失败，进入下一轮。
             continue
 
         self.task_manager.update_status(bug_id, TaskStatus.FAILED)
@@ -261,12 +262,73 @@ class RepairAgent:
             return ToolResult(tool="run_test", success=False, exit_code=1, stdout_summary="", stderr_summary="test tool missing", data={}, artifacts=[])
         return tool.run({})
 
-    def _create_pr(self, task: RepairTask, bug_event: BugEvent) -> str:
+    def _create_pr(self, task: RepairTask, bug_event: BugEvent) -> ToolResult:
         """进入创建 PR 流程但不自动合并。"""
-        pr_url = f"https://gitee.example/{bug_event.project}/pulls/{task.id}"
-        self.session_store.put(f"pr:{task.id}", pr_url)
-        return pr_url
+        git_tool = self.registry.get("git_tool")
+        gitee_tool = self.registry.get("gitee_tool")
+        if git_tool is None or gitee_tool is None:
+            return ToolResult(tool="gitee_tool", success=False, exit_code=1, stdout_summary="", stderr_summary="git or gitee tool missing", data={}, artifacts=[])
+
+        branch_name = self._build_branch_name(bug_event)
+        short_title = self._short_title(bug_event)
+        pr_title = f"[Agent Fix] 修复 {bug_event.exception_type or bug_event.title or short_title}"
+        pr_body = self._build_pr_body(task, bug_event)
+
+        git_tool.run({"action": "create_branch", "args": {"branch": branch_name}})
+        git_tool.run({"action": "add", "args": {"paths": ["."]}})
+        git_tool.run({"action": "commit", "args": {"message": f"fix: {short_title}"}})
+        git_tool.run({"action": "push", "args": {"remote": "origin", "branch": branch_name}})
+
+        pr_result = gitee_tool.run({"action": "create_pull_request", "args": {"title": pr_title, "body": pr_body, "head": branch_name, "base": self.config.project.default_branch}})
+        if pr_result.success:
+            self.session_store.put(f"pr:{task.id}", pr_result.data.get("pr_url", ""))
+        return pr_result
 
     def _send_feishu_help(self, bug_event: BugEvent, session: dict[str, Any], last_result: ToolResult | None) -> None:
         """失败后记录飞书求助信息。"""
         self.session_store.put(f"feishu_help:{bug_event.bug_id}", {"bug": bug_event.model_dump(), "session": session, "last_result": last_result.model_dump() if last_result else None})
+
+    def _short_title(self, bug_event: BugEvent) -> str:
+        """生成用于分支名和提交信息的短标题。"""
+        source = bug_event.title or bug_event.exception_type or bug_event.message or bug_event.bug_id
+        slug = "-".join(part for part in source.lower().replace("/", " ").replace("_", " ").split())
+        return slug[:40].strip("-") or bug_event.bug_id.lower()
+
+    def _build_branch_name(self, bug_event: BugEvent) -> str:
+        """生成规范化分支名。"""
+        return f"agent-fix/{bug_event.project}-{bug_event.bug_id}-{self._short_title(bug_event)}"
+
+    def _build_pr_body(self, task: RepairTask, bug_event: BugEvent) -> str:
+        """拼装符合要求的 PR 描述。"""
+        compile_result = self._extract_session_value(task.bug_id, "compile_result")
+        test_result = self._extract_session_value(task.bug_id, "test_result")
+        modified_files = self._extract_modified_files(task.bug_id)
+        session_path = task.session_path or f"session://{task.bug_id}"
+        return (
+            f"## Bug 摘要\n- ID: {bug_event.bug_id}\n- 标题: {bug_event.title or bug_event.exception_type}\n- 请求路径: {bug_event.request_path}\n\n"
+            f"## 根因分析\n- 待补充：根据 traceback 与修改记录总结根因\n\n"
+            f"## 修复方案\n- 待补充：说明修改思路与验证路径\n\n"
+            f"## 修改文件\n{self._format_bullet_list(modified_files)}\n\n"
+            f"## mvn compile 结果\n- {json.dumps(compile_result, ensure_ascii=False) if compile_result else 'N/A'}\n\n"
+            f"## mvn test 结果\n- {json.dumps(test_result, ensure_ascii=False) if test_result else 'N/A'}\n\n"
+            f"## 风险说明\n- 仍需关注回归测试与边界输入\n\n"
+            f"## session 路径\n- {session_path}\n\n"
+            f"## Review 提醒\n- 请重点检查异常修复是否覆盖核心业务路径\n"
+        )
+
+    def _extract_session_value(self, bug_id: str, key: str) -> Any:
+        """从 session 中提取指定字段。"""
+        session = self._load_session(bug_id)
+        return session.get(key)
+
+    def _extract_modified_files(self, bug_id: str) -> list[str]:
+        """从 session 中提取修改文件列表。"""
+        session = self._load_session(bug_id)
+        files = session.get("modified_files")
+        return files if isinstance(files, list) else []
+
+    def _format_bullet_list(self, items: list[str]) -> str:
+        """格式化条目列表。"""
+        if not items:
+            return "- N/A"
+        return "\n".join(f"- {item}" for item in items)
