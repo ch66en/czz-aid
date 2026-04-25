@@ -78,6 +78,16 @@ class RepairAgent:
 
     def build_prompt_template(self, bug_event: BugEvent, skills: list[str], session: dict[str, Any]) -> str:
         """构造修复代理系统提示词模板。"""
+        tool_specs = [tool.spec.model_dump() if hasattr(tool.spec, "model_dump") else dict(vars(tool.spec)) for tool in self.registry.list_tools()]
+        tool_usage_notes = [
+            "1. 只能从 Tools 列表中选择工具名，不允许臆造新工具。",
+            "2. edit_code 只能在写入允许目录后再执行，且修改后必须走 compile -> test。",
+            "3. run_compile 是唯一允许的编译步骤，禁止直接跳过。",
+            "4. run_test 是唯一允许的测试步骤，编译成功后必须执行。",
+            "5. run_command 只能用于白名单命令，不允许危险命令。",
+            "6. finish_patch 只能在已经完成代码修改后输出，表示进入 compile/test 阶段。",
+            "7. 若 compile/test 失败，必须把失败摘要纳入下一轮决策。",
+        ]
         return (
             "你是一个受严格流程约束的自动修复代理。\n"
             "必须遵循以下硬约束：\n"
@@ -93,6 +103,8 @@ class RepairAgent:
             f"BugEvent: {bug_event.model_dump_json()}\n"
             f"Skills: {json.dumps(skills, ensure_ascii=False)}\n"
             f"Session: {json.dumps(session, ensure_ascii=False)}\n"
+            f"Tools: {json.dumps(tool_specs, ensure_ascii=False)}\n"
+            f"ToolUsageNotes: {json.dumps(tool_usage_notes, ensure_ascii=False)}\n"
             "\n"
             "LLM 必须只输出 JSON action，格式如下：\n"
             '{"tool":"SearchCode","arguments":{},"reason":"..."}\n'
@@ -105,63 +117,73 @@ class RepairAgent:
         task = self.task_manager.create_task(bug_id)
         self.task_manager.update_status(bug_id, TaskStatus.RUNNING)
         bug_event = self._load_bug_event(bug_id)
+        self._save_bug_event(bug_event)
         session = self._load_session(bug_id)
         skills = self._load_skills(bug_event.project)
         prompt_template = self.build_prompt_template(bug_event, skills, session)
         history: list[dict[str, Any]] = []
-        modified = False
         last_result: ToolResult | None = None
 
         for _ in range(3):
-            action = self._ask_llm(prompt_template, bug_event, skills, session, history)
-            history.append(action)
-            tool_name = str(action.get("tool", ""))
-            if tool_name == "finish_patch":
-                if not modified:
-                    last_result = ToolResult(tool="finish_patch", success=False, exit_code=1, stdout_summary="no patch produced", stderr_summary="", data={}, artifacts=[])
-                    break
-                compile_result = self._run_compile()
-                history.append({"tool": "RunCompileTool", "result": compile_result.model_dump()})
-                if not compile_result.success:
-                    last_result = compile_result
+            modified = False
+            while True:
+                action = self._ask_llm(prompt_template, history)
+                history.append(action)
+                tool_name = str(action.get("tool", ""))
+                if tool_name == "finish_patch":
+                    if not modified:
+                        last_result = ToolResult(tool="finish_patch", success=False, exit_code=1, stdout_summary="no patch produced", stderr_summary="", data={}, artifacts=[])
+                        session["last_error"] = last_result.model_dump()
+                        self._save_session(bug_id, session)
+                        break
+                    compile_result = self._run_compile()
+                    history.append({"tool": "RunCompileTool", "result": compile_result.model_dump()})
                     session["compile_result"] = compile_result.model_dump()
                     self._save_session(bug_id, session)
-                    continue
-                test_result = self._run_test()
-                history.append({"tool": "RunTestTool", "result": test_result.model_dump()})
-                if not test_result.success:
-                    last_result = test_result
+                    if not compile_result.success:
+                        last_result = compile_result
+                        break
+                    test_result = self._run_test()
+                    history.append({"tool": "RunTestTool", "result": test_result.model_dump()})
                     session["test_result"] = test_result.model_dump()
                     self._save_session(bug_id, session)
+                    if not test_result.success:
+                        last_result = test_result
+                        break
+                    pr_url = self._create_pr(task, bug_event)
+                    task.pr_url = pr_url
+                    task.status = TaskStatus.PASSED
+                    self.task_manager.update_status(bug_id, TaskStatus.PASSED)
+                    self._save_session(bug_id, {**session, "pr_url": pr_url, "status": "passed"})
+                    return RepairRunResult(True, "passed", "repair succeeded", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
+
+                tool = self.registry.get(tool_name.lower()) or self.registry.get(tool_name)
+                if tool is None:
+                    last_result = ToolResult(tool=tool_name or "unknown", success=False, exit_code=1, stdout_summary="", stderr_summary=f"tool not found: {tool_name}", data={}, artifacts=[])
+                    session["last_error"] = last_result.model_dump()
+                    self._save_session(bug_id, session)
                     continue
-                pr_url = self._create_pr(task, bug_event)
-                task.pr_url = pr_url
-                task.status = TaskStatus.PASSED
-                self.task_manager.update_status(bug_id, TaskStatus.PASSED)
-                self._save_session(bug_id, {**session, "pr_url": pr_url, "status": "passed"})
-                return RepairRunResult(True, "passed", "repair succeeded", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
 
-            tool = self.registry.get(tool_name.lower()) or self.registry.get(tool_name)
-            if tool is None:
-                last_result = ToolResult(tool=tool_name or "unknown", success=False, exit_code=1, stdout_summary="", stderr_summary=f"tool not found: {tool_name}", data={}, artifacts=[])
-                session["last_error"] = last_result.model_dump()
+                allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), action.get("arguments", {}))
+                if not allowed:
+                    last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={}, artifacts=[])
+                    session["last_error"] = last_result.model_dump()
+                    self._save_session(bug_id, session)
+                    continue
+
+                result = tool.run(action.get("arguments", {}))
+                history.append({"tool": tool.spec.name, "result": result.model_dump()})
+                last_result = result
+                session["last_tool_result"] = result.model_dump()
                 self._save_session(bug_id, session)
+                if tool.spec.name == "edit_code" and result.success:
+                    modified = True
+
+                # 继续在当前轮次中等待 finish_patch，直到进入编译/测试阶段。
                 continue
 
-            allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), action.get("arguments", {}))
-            if not allowed:
-                last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={}, artifacts=[])
-                session["last_error"] = last_result.model_dump()
-                self._save_session(bug_id, session)
-                continue
-
-            result = tool.run(action.get("arguments", {}))
-            history.append({"tool": tool.spec.name, "result": result.model_dump()})
-            last_result = result
-            session["last_tool_result"] = result.model_dump()
-            self._save_session(bug_id, session)
-            if tool.spec.name == "edit_code" and result.success:
-                modified = True
+            # 当前轮次结束，但测试失败后才算一轮失败，进入下一轮。
+            continue
 
         self.task_manager.update_status(bug_id, TaskStatus.FAILED)
         self._send_feishu_help(bug_event, session, last_result)
@@ -179,6 +201,7 @@ class RepairAgent:
             title="",
             exception_type="UnknownError",
             message="",
+            traceback="",
             fingerprint=bug_id,
         )
 
@@ -192,6 +215,10 @@ class RepairAgent:
         sanitized_session = json.loads(self.sanitizer.sanitize(json.dumps(session, ensure_ascii=False)))
         self.session_store.put(bug_id, sanitized_session)
 
+    def _save_bug_event(self, bug_event: BugEvent) -> None:
+        """把 BugEvent 写入会话存储，供后续轮次读取。"""
+        self.session_store.put(f"bug_event:{bug_event.bug_id}", bug_event.model_dump())
+
     def _load_skills(self, project: str) -> list[str]:
         """按项目检索相关技能。"""
         skills: list[str] = []
@@ -202,7 +229,7 @@ class RepairAgent:
                     skills.append(value)
         return skills
 
-    def _ask_llm(self, prompt_template: str, bug_event: BugEvent, skills: list[str], session: dict[str, Any], history: list[dict[str, Any]]) -> dict[str, Any]:
+    def _ask_llm(self, prompt_template: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         """请求 LLM 输出下一步动作。"""
         if self.llm_client is None:
             if not any(item.get("tool") == "edit_code" for item in history):
@@ -210,8 +237,7 @@ class RepairAgent:
             return {"tool": "finish_patch", "arguments": {}, "reason": "done"}
         response = self.llm_client.chat([
             {"role": "system", "content": prompt_template},
-            {"role": "user", "content": bug_event.model_dump_json()},
-            {"role": "user", "content": json.dumps(session, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(history, ensure_ascii=False)},
         ])
         payload = response.data.get("content") if isinstance(response.data, dict) else None
         if isinstance(payload, str):

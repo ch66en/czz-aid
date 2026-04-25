@@ -24,3 +24,7 @@ class ToolRegistry:
     def list_specs(self) -> list[ToolSpec]:
         """返回当前所有已注册工具的描述信息。"""
         return [tool.spec for tool in self._tools.values()]
+
+    def list_tools(self) -> list[BaseTool]:
+        """返回当前所有已注册工具实例。"""
+        return list(self._tools.values())

@@ -48,6 +48,7 @@ class BugEvent(BaseModel):
     title: str
     exception_type: str
     message: str
+    traceback: str = ""
     request_path: str = ""
     request_method: str = ""
     top_business_frame: str = ""

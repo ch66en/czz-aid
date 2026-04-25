@@ -6,11 +6,15 @@ import argparse
 from typing import Sequence
 
 from agent.config import load_config
+from agent.core.dedup_engine import DedupEngine
 from agent.core.permission_guard import PermissionGuard
 from agent.core.repair_agent import RepairAgent
 from agent.core.task_manager import TaskManager
 from agent.core.tool_registry import ToolRegistry
 from agent.doctor.doctor import Doctor
+from agent.ingestion.pipeline import IngestionPipeline
+from agent.ingestion.sanitizer import Sanitizer
+from agent.ingestion.traceback_parser import TracebackParser
 from agent.reflection.reflection_subagent import ReflectionSubAgent
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
@@ -27,6 +31,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     repair_parser = subparsers.add_parser("repair")
     repair_parser.add_argument("--bug-id", required=True)
+    repair_parser.add_argument("--raw-log", default="")
+    repair_parser.add_argument("--source", default="unknown")
+    repair_parser.add_argument("--project", default="default-project")
+    repair_parser.add_argument("--title", default="")
+    repair_parser.add_argument("--request-path", default="")
+    repair_parser.add_argument("--request-method", default="")
+    repair_parser.add_argument("--package-prefix", default="")
 
     reflect_parser = subparsers.add_parser("reflect")
     reflect_parser.add_argument("--bug-id", required=True)
@@ -39,7 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """根据命令行参数执行对应的代理流程。"""
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config()
+    config = load_config("config.example.yaml")
 
     registry = ToolRegistry()
     permission_guard = PermissionGuard()
@@ -55,6 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         session_store=session_store,
         skill_store=skill_store,
     )
+    pipeline = IngestionPipeline(session_store=session_store, dedup_engine=DedupEngine(), sanitizer=Sanitizer(), traceback_parser=TracebackParser(), repair_agent=repair_agent)
     doctor = Doctor(config=config)
     reflection = ReflectionSubAgent(task_store=task_store, skill_store=skill_store)
 
@@ -65,7 +77,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("watch mode started")
         return 0
     if args.command == "repair":
-        print(repair_agent.repair(args.bug_id))
+        result = pipeline.process(
+            raw_text=args.raw_log,
+            bug_id=args.bug_id,
+            source=args.source,
+            project=args.project,
+            title=args.title,
+            request_path=args.request_path,
+            request_method=args.request_method,
+            package_prefix=args.package_prefix or None,
+        )
+        print(result.repair_result or result)
         return 0
     if args.command == "reflect":
         print(reflection.reflect(args.bug_id, args.result))

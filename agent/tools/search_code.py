@@ -28,7 +28,7 @@ class SearchCodeTool(BaseTool):
         root = Path(str(data.get("root", ".")))
         keyword = str(data.get("keyword", ""))
         matches: list[str] = []
-        for path in root.rglob("*.py"):
+        for path in root.rglob("*.java"):
             try:
                 if keyword and keyword in path.read_text(encoding="utf-8"):
                     matches.append(str(path))
