@@ -13,9 +13,9 @@ class TaskManager:
         """初始化任务管理器。"""
         self.task_store = task_store
 
-    def create_task(self, bug_id: str) -> RepairTask:
+    def create_task(self, bug_id: str, project: str = "default-project") -> RepairTask:
         """创建一条新的待处理修复任务。"""
-        task = RepairTask(bug_id=bug_id, status=TaskStatus.PENDING)
+        task = RepairTask(bug_id=bug_id, project=project, status=TaskStatus.PENDING)
         self.task_store.save(task)
         return task
 
