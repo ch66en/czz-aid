@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent.models import ToolResult, ToolSpec
-from agent.tools.base import BaseTool
+from agent.tools.base import BaseTool, PermissionType
 
 
 class FeishuTool(BaseTool):
@@ -15,6 +15,11 @@ class FeishuTool(BaseTool):
     def spec(self) -> ToolSpec:
         """返回飞书工具的规格说明。"""
         return ToolSpec(name="feishu_tool", description="Minimal feishu helper", requires_approval=True)
+
+    @property
+    def permission(self) -> PermissionType:
+        """返回飞书工具所需权限。"""
+        return PermissionType.EXTERNAL_NOTIFY
 
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """返回飞书工具已就绪的占位结果。"""
