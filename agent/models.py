@@ -133,3 +133,10 @@ class SkillMeta(BaseModel):
     description: str = ""
     source_bug_id: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ReviewDecision(str, Enum):
+    """表示人工审核事件的结果。"""
+
+    REVIEW_PASSED = "review_passed"
+    REVIEW_FAILED = "review_failed"
