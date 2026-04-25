@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.models import ToolCallResult, ToolSpec
+from agent.models import ToolResult, ToolSpec
 from agent.tools.base import BaseTool
 
 
@@ -16,6 +16,14 @@ class GitTool(BaseTool):
         """返回 Git 工具的规格说明。"""
         return ToolSpec(name="git_tool", description="Minimal git helper", requires_approval=True)
 
-    def run(self, payload: dict[str, Any] | None = None) -> ToolCallResult:
+    def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """返回 Git 工具已就绪的占位结果。"""
-        return ToolCallResult(success=True, output="git tool ready")
+        return ToolResult(
+            tool="git_tool",
+            success=True,
+            exit_code=0,
+            stdout_summary="git tool ready",
+            stderr_summary="",
+            data={},
+            artifacts=[],
+        )

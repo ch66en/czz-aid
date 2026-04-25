@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.models import ToolCallResult, ToolSpec
+from agent.models import ToolResult, ToolSpec
 from agent.tools.base import BaseTool
 
 
@@ -16,6 +16,14 @@ class GiteeTool(BaseTool):
         """返回 Gitee 工具的规格说明。"""
         return ToolSpec(name="gitee_tool", description="Minimal gitee helper", requires_approval=True)
 
-    def run(self, payload: dict[str, Any] | None = None) -> ToolCallResult:
+    def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """返回 Gitee 工具已就绪的占位结果。"""
-        return ToolCallResult(success=True, output="gitee tool ready")
+        return ToolResult(
+            tool="gitee_tool",
+            success=True,
+            exit_code=0,
+            stdout_summary="gitee tool ready",
+            stderr_summary="",
+            data={},
+            artifacts=[],
+        )

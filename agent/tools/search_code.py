@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.models import ToolCallResult, ToolSpec
+from agent.models import ToolResult, ToolSpec
 from agent.tools.base import BaseTool
 
 
@@ -17,7 +17,7 @@ class SearchCodeTool(BaseTool):
         """返回代码搜索工具的规格说明。"""
         return ToolSpec(name="search_code", description="Search text in code files")
 
-    def run(self, payload: dict[str, Any] | None = None) -> ToolCallResult:
+    def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """遍历目录并收集包含目标关键字的文件路径。"""
         data = payload or {}
         root = Path(str(data.get("root", ".")))
@@ -30,4 +30,12 @@ class SearchCodeTool(BaseTool):
                     matches.append(str(path))
             except OSError:
                 continue
-        return ToolCallResult(success=True, output="\n".join(matches))
+        return ToolResult(
+            tool="search_code",
+            success=True,
+            exit_code=0,
+            stdout_summary=f"found {len(matches)} file(s)",
+            stderr_summary="",
+            data={"keyword": keyword, "matches": matches},
+            artifacts=matches,
+        )

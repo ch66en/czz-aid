@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from agent.models import ToolCallResult, ToolSpec
+from agent.models import ToolResult, ToolSpec
 from agent.tools.base import BaseTool
 
 
@@ -17,10 +17,17 @@ class RunCommandTool(BaseTool):
         """返回命令执行工具的规格说明。"""
         return ToolSpec(name="run_command", description="Run a shell command", requires_approval=True)
 
-    def run(self, payload: dict[str, Any] | None = None) -> ToolCallResult:
+    def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """根据传入命令执行子进程。"""
         data = payload or {}
         command = str(data.get("command", ""))
         completed = subprocess.run(command, capture_output=True, text=True, shell=True, check=False)
-        output = (completed.stdout or "") + (completed.stderr or "")
-        return ToolCallResult(success=completed.returncode == 0, output=output, metadata={"returncode": completed.returncode})
+        return ToolResult(
+            tool="run_command",
+            success=completed.returncode == 0,
+            exit_code=completed.returncode,
+            stdout_summary=(completed.stdout or "").strip(),
+            stderr_summary=(completed.stderr or "").strip(),
+            data={"command": command},
+            artifacts=[],
+        )

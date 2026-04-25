@@ -1,16 +1,32 @@
-app:
-  name: auto-fix-agent
-  env: dev
-  workspace: .
+env: dev
+workspace: .
+project:
+  name: demo-service
+  root: .
+  language: java
+  default_branch: master
 llm:
   base_url: https://api.openai.com/v1
   api_key: your-api-key
   model: gpt-5.2-codex-compatible
-storage:
-  sqlite_path: ./data/agent.db
-integrations:
-  feishu_webhook: ""
-  gitee_token: ""
-watch:
-  paths:
+  timeout_seconds: 60
+gitee:
+  base_url: https://gitee.com/api/v5
+  token: your-gitee-token
+  owner: your-owner
+  repo: your-repo
+feishu:
+  webhook: ""
+  app_id: ""
+  app_secret: ""
+  approval_chat_id: ""
+session:
+  root_dir: ./data/sessions
+  retention_days: 7
+agent:
+  name: auto-fix-agent
+  max_retry: 3
+  reflection_enabled: true
+  review_required: true
+  watch_paths:
     - ./logs

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.models import ToolCallResult, ToolSpec
+from agent.models import ToolResult, ToolSpec
 from agent.tools.base import BaseTool
 
 
@@ -17,10 +17,26 @@ class ReadCodeTool(BaseTool):
         """返回源码读取工具的规格说明。"""
         return ToolSpec(name="read_code", description="Read a code file")
 
-    def run(self, payload: dict[str, Any] | None = None) -> ToolCallResult:
+    def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """根据路径参数读取源码文件。"""
         data = payload or {}
         path = Path(str(data.get("path", "")))
         if not path.exists():
-            return ToolCallResult(success=False, output="code file not found")
-        return ToolCallResult(success=True, output=path.read_text(encoding="utf-8"))
+            return ToolResult(
+                tool="read_code",
+                success=False,
+                exit_code=1,
+                stdout_summary="",
+                stderr_summary="code file not found",
+                data={"path": str(path)},
+                artifacts=[],
+            )
+        return ToolResult(
+            tool="read_code",
+            success=True,
+            exit_code=0,
+            stdout_summary="code file loaded",
+            stderr_summary="",
+            data={"path": str(path), "content": path.read_text(encoding="utf-8")},
+            artifacts=[str(path)],
+        )

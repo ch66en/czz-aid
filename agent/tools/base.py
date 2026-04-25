@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from agent.models import ToolCallResult, ToolSpec
+from agent.models import ToolResult, ToolSpec
 
 
 class BaseTool(ABC):
@@ -18,6 +18,6 @@ class BaseTool(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def run(self, payload: dict[str, Any] | None = None) -> ToolCallResult:
+    def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """执行工具逻辑并返回统一结果。"""
         raise NotImplementedError
