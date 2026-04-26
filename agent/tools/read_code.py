@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """提供源码文件读取工具。"""
 
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -15,17 +16,47 @@ class ReadCodeTool(BaseTool):
     @property
     def spec(self) -> ToolSpec:
         """返回源码读取工具的规格说明。"""
-        return ToolSpec(name="read_code", description="Read a code file", input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, permission=PermissionType.READ_ONLY.value, executor="local")
+        return ToolSpec(
+            name="read_code",
+            description="Read a code file or line range",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
+            permission=PermissionType.READ_ONLY.value,
+            executor="local",
+        )
 
     @property
     def permission(self) -> PermissionType:
-        """返回源码读取工具所需权限。"""
         return PermissionType.READ_ONLY
 
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
-        """根据路径参数读取源码文件。"""
         data = payload or {}
         path = Path(str(data.get("path", "")))
         if not path.exists():
-            return ToolResult(tool="read_code", success=False, exit_code=1, stdout_summary="", stderr_summary="code file not found", data={"path": str(path)}, artifacts=[])
-        return ToolResult(tool="read_code", success=True, exit_code=0, stdout_summary="code file loaded", stderr_summary="", data={"path": str(path), "content": path.read_text(encoding="utf-8")}, artifacts=[str(path)])
+            return ToolResult(tool="read_code", success=False, exit_code=1, stderr_summary="code file not found", data={"path": str(path)}, artifacts=[])
+        lines = path.read_text(encoding="utf-8").splitlines()
+        start_line = data.get("start_line")
+        end_line = data.get("end_line")
+        if start_line is not None or end_line is not None:
+            start = int(start_line or 1)
+            end = int(end_line or len(lines))
+            if start < 1 or end < start:
+                return ToolResult(tool="read_code", success=False, exit_code=1, stderr_summary="invalid line range", data={"path": str(path), "start_line": start, "end_line": end}, artifacts=[])
+            selected = lines[start - 1 : end]
+            content = "\n".join(f"{idx} | {text}" for idx, text in enumerate(selected, start=start))
+            raw = "\n".join(selected)
+            return ToolResult(tool="read_code", success=True, exit_code=0, stdout_summary="code range loaded", data={"path": str(path), "startLine": start, "endLine": end, "totalLines": len(lines), "content": content, "contentHash": self._content_hash(raw)}, artifacts=[str(path)])
+        if len(lines) > 300:
+            return ToolResult(tool="read_code", success=False, exit_code=1, stderr_summary="file too large, please use ast_symbols or read_symbol_at to locate a smaller range", data={"path": str(path), "totalLines": len(lines)}, artifacts=[])
+        content = "\n".join(f"{idx} | {text}" for idx, text in enumerate(lines, start=1))
+        return ToolResult(tool="read_code", success=True, exit_code=0, stdout_summary="code file loaded", data={"path": str(path), "totalLines": len(lines), "content": content, "contentHash": self._content_hash("\n".join(lines))}, artifacts=[str(path)])
+
+    def _content_hash(self, text: str) -> str:
+        return f"sha256:{sha256(text.encode('utf-8')).hexdigest()}"

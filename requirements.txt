@@ -5,3 +5,5 @@ watchdog
 gitpython
 pytest
 openai
+tree-sitter
+tree-sitter-java
