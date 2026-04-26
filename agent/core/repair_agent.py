@@ -16,10 +16,12 @@ from agent.models import BugEvent, RepairTask, TaskStatus, ToolResult
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.tools.base import ToolContext
+from agent.tools.ast_symbols_tool import AstSymbolsTool
 from agent.tools.compile_tool import RunCompileTool
 from agent.tools.edit_code import EditCodeTool
 from agent.tools.git_diff import GitDiffTool
 from agent.tools.read_code import ReadCodeTool
+from agent.tools.read_symbol_at_tool import ReadSymbolAtTool
 from agent.tools.run_command import RunCommandTool
 from agent.tools.search_code import SearchCodeTool
 from agent.tools.test_tool import RunTestTool
@@ -65,6 +67,8 @@ class RepairAgent:
     def _ensure_core_tools(self) -> None:
         """确保核心工具已注册到工具注册表。"""
         for tool in [
+            AstSymbolsTool(),
+            ReadSymbolAtTool(),
             ReadCodeTool(),
             SearchCodeTool(),
             EditCodeTool(),
@@ -81,12 +85,17 @@ class RepairAgent:
         tool_specs = [tool.spec.model_dump() if hasattr(tool.spec, "model_dump") else dict(vars(tool.spec)) for tool in self.registry.list_tools()]
         tool_usage_notes = [
             "1. 只能从 Tools 列表中选择工具名，不允许臆造新工具。",
-            "2. edit_code 只能在写入允许目录后再执行，且修改后必须走 compile -> test。",
-            "3. run_compile 是唯一允许的编译步骤，禁止直接跳过。",
-            "4. run_test 是唯一允许的测试步骤，编译成功后必须执行。",
-            "5. run_command 只能用于白名单命令，不允许危险命令。",
-            "6. finish_patch 只能在已经完成代码修改后输出，表示进入 compile/test 阶段。",
-            "7. 若 compile/test 失败，必须把失败摘要纳入下一轮决策。",
+            "2. 遇到 Java traceback 或测试失败中的 file:line 时，必须优先使用 read_symbol_at(path, line) 或 ast_symbols(path) 定位。",
+            "3. 不能在有 file:line 的情况下直接读取整个大文件。",
+            "4. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。",
+            "5. 如果 read_code 不传 start_line/end_line 且文件太大失败，应改用 ast_symbols/read_symbol_at。",
+            "6. 修改代码前必须至少读取相关函数代码。",
+            "7. edit_code 只能在写入允许目录后再执行，且修改后必须走 compile -> test。",
+            "8. run_compile 是唯一允许的编译步骤，禁止直接跳过。",
+            "9. run_test 是唯一允许的测试步骤，编译成功后必须执行。",
+            "10. run_command 只能用于白名单命令，不允许危险命令。",
+            "11. finish_patch 只能在已经完成代码修改后输出，表示进入 compile/test 阶段。",
+            "12. 若 compile/test 失败，必须把失败摘要纳入下一轮决策。",
         ]
         return (
             "你是一个受严格流程约束的自动修复代理。\n"

@@ -49,6 +49,7 @@ class BugEvent(BaseModel):
     exception_type: str
     message: str
     traceback: str = ""
+    frames: list[StackFrame] = Field(default_factory=list)
     request_path: str = ""
     request_method: str = ""
     top_business_frame: str = ""
