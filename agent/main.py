@@ -3,6 +3,7 @@ from __future__ import annotations
 """提供命令行入口并装配系统组件。"""
 
 import argparse
+from pathlib import Path
 from typing import Sequence
 
 from agent.config import load_config
@@ -32,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     repair_parser = subparsers.add_parser("repair")
     repair_parser.add_argument("--bug-id", required=True)
     repair_parser.add_argument("--raw-log", default="")
+    repair_parser.add_argument("--raw-log-path", default="")
     repair_parser.add_argument("--source", default="unknown")
     repair_parser.add_argument("--project", default="default-project")
     repair_parser.add_argument("--title", default="")
@@ -68,7 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pipeline = IngestionPipeline(session_store=session_store, dedup_engine=DedupEngine(), sanitizer=Sanitizer(), traceback_parser=TracebackParser(), repair_agent=repair_agent)
     doctor = Doctor(config=config)
-    reflection = ReflectionSubAgent(task_store=task_store, skill_store=skill_store)
+    reflection = ReflectionSubAgent(config=config, session_store=session_store, skill_store=skill_store)
 
     if args.command == "doctor":
         print(doctor.run())
@@ -77,8 +79,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("watch mode started")
         return 0
     if args.command == "repair":
+        raw_log = args.raw_log
+        if args.raw_log_path:
+            raw_log = Path(args.raw_log_path).read_text(encoding="utf-8")
         result = pipeline.process(
-            raw_text=args.raw_log,
+            raw_text=raw_log,
             bug_id=args.bug_id,
             source=args.source,
             project=args.project,

@@ -3,6 +3,7 @@ from __future__ import annotations
 """提供命令执行工具。"""
 
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from agent.config import AppConfig
@@ -31,5 +32,6 @@ class RunCommandTool(BaseTool):
         """根据项目配置执行测试或编译命令。"""
         data = payload or {}
         command = str(data.get("command", ""))
-        completed = subprocess.run(command, capture_output=True, text=True, shell=True, check=False)
+        cwd = Path(self.config.project.root) if self.config.project.root else None
+        completed = subprocess.run(command, capture_output=True, text=True, shell=True, check=False, cwd=str(cwd) if cwd is not None else None)
         return ToolResult(tool="run_command", success=completed.returncode == 0, exit_code=completed.returncode, stdout_summary=(completed.stdout or "").strip(), stderr_summary=(completed.stderr or "").strip(), data={"command": command}, artifacts=[])
