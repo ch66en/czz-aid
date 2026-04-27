@@ -16,6 +16,8 @@ class FakeCompletions:
 
     def create(self, **kwargs: object) -> object:
         self.last_kwargs = kwargs
+        if isinstance(self.response, Exception):
+            raise self.response
         return self.response
 
 
@@ -45,8 +47,22 @@ def test_llm_client_records_summary_in_normal_mode() -> None:
     result = client.chat([{"role": "user", "content": "hi"}])
 
     assert result.success is True
+    assert result.data["content"] == "hello"
+    assert client.client.chat.completions.last_kwargs["timeout"] == config.llm.timeout_seconds
     assert client.records[-1].summary.startswith("model=")
     assert client.records[-1].input_text == ""
+
+
+def test_llm_client_returns_failure_on_request_error() -> None:
+    """Request failures should become ToolResult failures instead of hanging the agent."""
+    config = AppConfig(llm={"api_key": "test", "base_url": "https://api.openai.com/v1", "timeout_seconds": 2})
+    client = OpenAICompatibleClient(config=config, client=FakeClient(TimeoutError("request timed out")))
+
+    result = client.chat([{"role": "user", "content": "hi"}])
+
+    assert result.success is False
+    assert result.exit_code == 1
+    assert "request timed out" in result.stderr_summary
 
 
 def test_llm_client_records_debug_details_with_sanitization() -> None:
