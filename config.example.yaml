@@ -7,7 +7,7 @@ project:
   default_branch: master
 llm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: sk-a377284bdcc442b68fdedcab70d9335e
+  api_key: 
   model: qwen3.6-plus
   timeout_seconds: 60
 gitee:
