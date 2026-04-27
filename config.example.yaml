@@ -7,7 +7,7 @@ project:
   default_branch: master
 llm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: sk-a53e116b611742bd8ff774b424f55592
+  api_key:
   
   model: deepseek-v4-flash
   timeout_seconds: 120
