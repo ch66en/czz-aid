@@ -43,7 +43,8 @@ class JavaSymbol:
 class JavaAstSymbolExtractor:
     """提取 Java 文件中的 class/method/constructor 符号。"""
 
-    def __init__(self) -> None:
+    def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose
         self._parser = Parser()
         self._parser.language = Language(tree_sitter_java.language())
 
@@ -84,7 +85,8 @@ class JavaAstSymbolExtractor:
             "code": code_lines,
             "contentHash": self._content_hash(raw_code),
         }
-        print(f"[ast-symbol] file={path} line={line} target={target['name']} {target['startLine']}-{target['endLine']}")
+        if self.verbose:
+            print(f"[ast-symbol] file={path} line={line} target={target['name']} {target['startLine']}-{target['endLine']}")
         return result
 
     def _collect_symbols(self, path: Path, source: bytes, node: Any, parent: str | None = None) -> list[JavaSymbol]:

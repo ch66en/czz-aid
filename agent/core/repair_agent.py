@@ -3,6 +3,7 @@ from __future__ import annotations
 """实现带粗流程约束的修复代理运行时。"""
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,10 @@ class RepairRunResult:
 class RepairAgent:
     """负责按固定粗流程驱动 LLM 工具调用与修复闭环。"""
 
+    ALLOWED_ACTION_TOOLS = {"search_code", "read_code", "read_symbol_at", "edit_code", "run_compile", "run_test", "finish_patch"}
+    MAX_TOOL_CALLS_PER_ROUND = 12
+    PROGRESS_TEXT_LIMIT = 300
+
     def __init__(
         self,
         config: AppConfig,
@@ -83,18 +88,22 @@ class RepairAgent:
 
     def build_prompt_template(self, bug_event: BugEvent, skills: list[str], session: dict[str, Any]) -> str:
         """构造修复代理系统提示词模板。"""
-        tool_specs = [tool.spec.model_dump() if hasattr(tool.spec, "model_dump") else dict(vars(tool.spec)) for tool in self.registry.list_tools()]
+        tool_specs = [
+            tool.spec.model_dump() if hasattr(tool.spec, "model_dump") else dict(vars(tool.spec))
+            for tool in self.registry.list_tools()
+            if tool.spec.name in self.ALLOWED_ACTION_TOOLS
+        ]
         tool_usage_notes = [
             "1. 只能从 Tools 列表中选择工具名，不允许臆造新工具。",
-            "2. 遇到 Java traceback 或测试失败中的 file:line 时，必须优先使用 read_symbol_at(path, line) 或 ast_symbols(path) 定位。",
+            "2. 遇到 Java traceback 或测试失败中的 file:line 时，必须优先使用 read_symbol_at(path, line) 定位。",
             "3. 不能在有 file:line 的情况下直接读取整个大文件。",
             "4. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。",
-            "5. 如果 read_code 不传 start_line/end_line 且文件太大失败，应改用 ast_symbols/read_symbol_at。",
+            "5. 如果 read_code 不传 start_line/end_line 且文件太大失败，应改用 read_symbol_at。",
             "6. 修改代码前必须至少读取相关函数代码。",
             "7. edit_code 只能在写入允许目录后再执行，content 必须使用统一 diff/patch 格式，且修改后必须走 compile -> test。",
             "8. run_compile 是唯一允许的编译步骤，禁止直接跳过。",
             "9. run_test 是唯一允许的测试步骤，编译成功后必须执行。",
-            "10. run_command 只能用于白名单命令，不允许危险命令。",
+            "10. 只能调用 AllowedTools 中列出的工具名。",
             "11. finish_patch 只能在已经完成代码修改后输出，表示进入 compile/test 阶段。",
             "12. 若 compile/test 失败，必须把失败摘要纳入下一轮决策。",
         ]
@@ -107,7 +116,7 @@ class RepairAgent:
             "4. edit_code 的 content 必须使用统一 diff/patch 格式，禁止输出整文件全文。\n"
             "5. patch 应尽量只覆盖 traceback 命中的函数或最小相关代码块；通常只包含一个 hunk。\n"
             "6. patch 示例：--- a/src/main/java/X.java\\n+++ b/src/main/java/X.java\\n@@\\n-        badLine();\\n+        fixedLine();\n"
-            "6. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
+            "6. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 深入定位。\n"
             "7. 不能在有 file:line 的情况下直接读取整个大文件。\n"
             "8. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。\n"
             "9. 修改代码前必须至少读取相关函数代码。\n"
@@ -118,8 +127,8 @@ class RepairAgent:
             "14. 禁止跳过 test。\n"
             "15. 禁止自动合并 PR。\n"
             "16. 成功后进入创建 PR 流程，失败后发送飞书求助。\n"
-            "4. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
-            "5. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
+            "4. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 深入定位。\n"
+            "5. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 深入定位。\n"
             "6. 不能在有 file:line 的情况下直接读取整个大文件。\n"
             "7. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。\n"
             "8. 修改代码前必须至少读取相关函数代码。\n"
@@ -136,10 +145,11 @@ class RepairAgent:
             f"Session: {json.dumps(session, ensure_ascii=False)}\n"
             f"FrameContexts: {json.dumps(session.get('frame_contexts', []), ensure_ascii=False)}\n"
             f"Tools: {json.dumps(tool_specs, ensure_ascii=False)}\n"
+            f"AllowedTools: {json.dumps(sorted(self.ALLOWED_ACTION_TOOLS), ensure_ascii=False)}\n"
             f"ToolUsageNotes: {json.dumps(tool_usage_notes, ensure_ascii=False)}\n"
             "\n"
             "LLM 必须只输出 JSON action，格式如下：\n"
-            '{"tool":"SearchCode","arguments":{},"reason":"..."}\n'
+            '{"tool":"search_code","arguments":{"keyword":"..."},"reason":"..."}\n'
             '当准备结束修改时输出 {"tool":"finish_patch","arguments":{},"reason":"..."}。\n'
             "如果编译或测试失败，把失败摘要作为上下文继续下一轮。"
         )
@@ -159,26 +169,37 @@ class RepairAgent:
         history: list[dict[str, Any]] = []
         last_result: ToolResult | None = None
 
-        for _ in range(3):
+        self._progress(f"[repair] start bug={bug_id}")
+        for round_index in range(3):
             modified = False
-            while True:
+            self._progress(f"[repair] round {round_index + 1}/3")
+            for step_index in range(self.MAX_TOOL_CALLS_PER_ROUND):
                 action = self._ask_llm(prompt_template, history)
+                normalized_tool_name = self._normalize_tool_name(action.get("tool"))
+                if normalized_tool_name is not None:
+                    action = {**action, "tool": normalized_tool_name}
                 history.append(action)
-                tool_name = str(action.get("tool", ""))
+                tool_name = normalized_tool_name or str(action.get("tool", ""))
+                self._progress(f"[agent] action {step_index + 1}: {self._format_action(action)}")
                 if tool_name == "finish_patch":
                     if not modified:
                         last_result = ToolResult(tool="finish_patch", success=False, exit_code=1, stdout_summary="no patch produced", stderr_summary="", data={}, artifacts=[])
+                        self._progress(f"[agent] finish rejected: {last_result.stdout_summary}")
                         session["last_error"] = last_result.model_dump()
                         self._save_session(bug_id, session)
                         break
+                    self._progress("[tool] run_compile start")
                     compile_result = self._run_compile()
+                    self._progress(f"[tool] run_compile done success={compile_result.success} {self._format_result_summary(compile_result)}")
                     history.append({"tool": "RunCompileTool", "result": compile_result.model_dump()})
                     session["compile_result"] = compile_result.model_dump()
                     self._save_session(bug_id, session)
                     if not compile_result.success:
                         last_result = compile_result
                         break
+                    self._progress("[tool] run_test start")
                     test_result = self._run_test()
+                    self._progress(f"[tool] run_test done success={test_result.success} {self._format_result_summary(test_result)}")
                     history.append({"tool": "RunTestTool", "result": test_result.model_dump()})
                     session["test_result"] = test_result.model_dump()
                     self._save_session(bug_id, session)
@@ -193,10 +214,19 @@ class RepairAgent:
                     self._save_session(bug_id, {**session, "pr_url": pr_url, "status": "passed"})
                     return RepairRunResult(True, "passed", "repair succeeded", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
 
-                tool = self.registry.get(tool_name.lower()) or self.registry.get(tool_name)
-                if tool is None:
-                    last_result = ToolResult(tool=tool_name or "unknown", success=False, exit_code=1, stdout_summary="", stderr_summary=f"tool not found: {tool_name}", data={}, artifacts=[])
+                if normalized_tool_name is None:
+                    last_result = ToolResult(tool=tool_name or "unknown", success=False, exit_code=1, stdout_summary="", stderr_summary=f"tool not allowed: {tool_name}", data={}, artifacts=[])
+                    self._progress(f"[tool] denied {tool_name or 'unknown'}: {last_result.stderr_summary}")
                     history.append({"tool": tool_name or "unknown", "result": last_result.model_dump()})
+                    session["last_error"] = last_result.model_dump()
+                    self._save_session(bug_id, session)
+                    continue
+
+                tool = self.registry.get(normalized_tool_name)
+                if tool is None:
+                    last_result = ToolResult(tool=normalized_tool_name, success=False, exit_code=1, stdout_summary="", stderr_summary=f"tool not found: {normalized_tool_name}", data={}, artifacts=[])
+                    self._progress(f"[tool] missing {normalized_tool_name}: {last_result.stderr_summary}")
+                    history.append({"tool": normalized_tool_name, "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
                     self._save_session(bug_id, session)
                     continue
@@ -204,12 +234,15 @@ class RepairAgent:
                 allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), action.get("arguments", {}))
                 if not allowed:
                     last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={}, artifacts=[])
+                    self._progress(f"[tool] denied {tool.spec.name}: {reason}")
                     history.append({"tool": tool.spec.name, "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
                     self._save_session(bug_id, session)
                     continue
 
+                self._progress(f"[tool] {tool.spec.name} start")
                 result = tool.run(action.get("arguments", {}))
+                self._progress(f"[tool] {tool.spec.name} done success={result.success} {self._format_result_summary(result)}")
                 history.append({"tool": tool.spec.name, "result": result.model_dump()})
                 last_result = result
                 session["last_tool_result"] = result.model_dump()
@@ -276,44 +309,101 @@ class RepairAgent:
     def _ask_llm(self, prompt_template: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         """请求 LLM 输出下一步动作。"""
         if self.llm_client is None:
-            if not any(item.get("tool") == "edit_code" for item in history):
-                target_path = self._pick_patch_target(prompt_template)
-                content = self._build_patch_content(target_path)
-                return {"tool": "edit_code", "arguments": {"path": target_path, "content": content}, "reason": "create patch"}
-            return {"tool": "finish_patch", "arguments": {}, "reason": "done"}
+            return {"tool": "finish_patch", "arguments": {}, "reason": "llm client missing"}
         messages = [
             {"role": "system", "content": prompt_template},
             {"role": "user", "content": json.dumps(history, ensure_ascii=False)},
         ]
-        print("=== LLM SEND START ===")
-        print(json.dumps(messages, ensure_ascii=False, indent=2))
-        print("=== LLM SEND END ===")
+        self._progress("[llm] asking next action...")
+        if self.config.agent.debug:
+            print("=== LLM SEND START ===")
+            print(json.dumps(messages, ensure_ascii=False, indent=2))
+            print("=== LLM SEND END ===")
         response = self.llm_client.chat(messages)
+        if self.config.agent.debug:
+            print(f"=== LLM RECEIVE success={response.success} exit_code={response.exit_code} ===")
+        if not response.success:
+            reason = response.stderr_summary or "llm request failed"
+            self._progress(f"[llm] failed: {self._short_text(reason)}")
+            return {"tool": "finish_patch", "arguments": {}, "reason": reason}
         payload = response.data.get("content") if isinstance(response.data, dict) else None
-        if isinstance(payload, str):
-            try:
-                return json.loads(payload)
-            except json.JSONDecodeError:
-                return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm output"}
+        if not isinstance(payload, str) or not payload.strip():
+            payload = response.stdout_summary
+        if isinstance(payload, str) and payload.strip():
+            self._progress("[llm] output:")
+            self._progress(payload)
+            return self._parse_llm_action(payload)
+        self._progress("[llm] output: <empty>")
         return {"tool": "finish_patch", "arguments": {}, "reason": "no llm output"}
+
+    def _parse_llm_action(self, payload: str) -> dict[str, Any]:
+        """Parse a JSON action from the model response."""
+        text = payload.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            action = json.loads(text)
+        except json.JSONDecodeError:
+            return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm output"}
+        if not isinstance(action, dict):
+            return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm action"}
+        normalized_tool_name = self._normalize_tool_name(action.get("tool"))
+        if normalized_tool_name is None:
+            return {"tool": str(action.get("tool", "")), "arguments": action.get("arguments", {}), "reason": "tool not allowed"}
+        arguments = action.get("arguments", {})
+        return {"tool": normalized_tool_name, "arguments": arguments if isinstance(arguments, dict) else {}, "reason": str(action.get("reason", ""))}
+
+    def _normalize_tool_name(self, tool_name: Any) -> str | None:
+        """Normalize model-provided tool names to registered snake_case names."""
+        raw = str(tool_name or "").strip()
+        if not raw:
+            return None
+        lowered = raw.lower()
+        compact = re.sub(r"[^a-z0-9]", "", lowered)
+        for allowed_name in self.ALLOWED_ACTION_TOOLS:
+            if lowered == allowed_name or compact == allowed_name.replace("_", ""):
+                return allowed_name
+        return None
+
+    def _progress(self, message: str) -> None:
+        """Print real-time progress and flush immediately for CLI runs."""
+        print(message, flush=True)
+
+    def _format_action(self, action: dict[str, Any]) -> str:
+        """Format a tool action without dumping large patch content twice."""
+        tool = str(action.get("tool", "unknown"))
+        arguments = action.get("arguments", {})
+        if not isinstance(arguments, dict):
+            arguments = {}
+        summarized_args: dict[str, Any] = {}
+        for key, value in arguments.items():
+            if key == "content":
+                summarized_args[key] = f"<{len(str(value))} chars>"
+            else:
+                summarized_args[key] = self._short_text(str(value))
+        reason = self._short_text(str(action.get("reason", "")))
+        return f"tool={tool} args={summarized_args} reason={reason}"
+
+    def _format_result_summary(self, result: ToolResult) -> str:
+        """Format a compact tool result summary."""
+        summary = result.stderr_summary or result.stdout_summary
+        return self._short_text(summary) if summary else ""
+
+    def _short_text(self, value: str, limit: int | None = None) -> str:
+        """Collapse whitespace and trim long progress fragments."""
+        max_len = limit or self.PROGRESS_TEXT_LIMIT
+        text = " ".join(str(value or "").split())
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 3] + "..."
 
     def _pick_patch_target(self, prompt_template: str) -> str:
         """从上下文中选择真实源码文件作为补丁目标。"""
-        if "QuickSortWithBugLogFile.java" in prompt_template:
-            return "E:/resourse/code/java/agent_test_1/agent_test_1/src/main/java/org/example/QuickSortWithBugLogFile.java"
-        if "Main.java" in prompt_template:
-            return "E:/resourse/code/java/agent_test_1/agent_test_1/src/main/java/org/example/Main.java"
-        return "E:/resourse/code/java/agent_test_1/agent_test_1/src/main/java/org/example/QuickSortWithBugLogFile.java"
+        raise RuntimeError("offline demo patch fallback has been removed")
 
     def _build_patch_content(self, target_path: str) -> str:
         """为默认离线模式生成最小 unified diff 补丁。"""
-        path = Path(target_path)
-        if path.name == "QuickSortWithBugLogFile.java":
-            return """--- a/src/main/java/org/example/QuickSortWithBugLogFile.java
-+++ b/src/main/java/org/example/QuickSortWithBugLogFile.java
-@@
--        int pivot = arr[right + 1];
-+        int pivot = arr[right];"""
         return ""
 
     def _run_compile(self) -> ToolResult:

@@ -36,7 +36,8 @@ class IngestionPipeline:
         self.sanitizer = sanitizer or Sanitizer()
         self.traceback_parser = traceback_parser or TracebackParser()
         self.repair_agent = repair_agent
-        self.ast_extractor = JavaAstSymbolExtractor()
+        self.verbose = bool(getattr(getattr(getattr(repair_agent, "config", None), "agent", None), "debug", False))
+        self.ast_extractor = JavaAstSymbolExtractor(verbose=self.verbose)
         self.project_root = Path(getattr(getattr(self.repair_agent, "config", None), "project", None).root if getattr(getattr(self.repair_agent, "config", None), "project", None) else ".")
 
     def process(self, raw_text: str, bug_id: str, source: str, project: str, title: str = "", request_path: str = "", request_method: str = "", package_prefix: str | None = None) -> PipelineResult:
@@ -102,9 +103,11 @@ class IngestionPipeline:
                 continue
             try:
                 path = self._resolve_source_path(frame.file_path)
-                print(f"[frame-context] frame={frame.file_path}:{frame.line_number} candidate_path={path}")
+                if self.verbose:
+                    print(f"[frame-context] frame={frame.file_path}:{frame.line_number} candidate_path={path}")
                 if path is None or not path.exists():
-                    print(f"[frame-context] skip missing source for {frame.file_path}:{frame.line_number}")
+                    if self.verbose:
+                        print(f"[frame-context] skip missing source for {frame.file_path}:{frame.line_number}")
                     continue
                 symbol_at = self.ast_extractor.find_symbol_at(str(path), frame.line_number)
                 symbol = symbol_at["symbol"]
@@ -121,7 +124,8 @@ class IngestionPipeline:
                     }
                 )
             except Exception as exc:
-                print(f"[frame-context] failed for {frame.file_path}:{frame.line_number} error={exc}")
+                if self.verbose:
+                    print(f"[frame-context] failed for {frame.file_path}:{frame.line_number} error={exc}")
                 continue
         return contexts
 
