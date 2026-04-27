@@ -91,7 +91,7 @@ class RepairAgent:
             "4. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。",
             "5. 如果 read_code 不传 start_line/end_line 且文件太大失败，应改用 ast_symbols/read_symbol_at。",
             "6. 修改代码前必须至少读取相关函数代码。",
-            "7. edit_code 只能在写入允许目录后再执行，且修改后必须走 compile -> test。",
+            "7. edit_code 只能在写入允许目录后再执行，content 必须使用统一 diff/patch 格式，且修改后必须走 compile -> test。",
             "8. run_compile 是唯一允许的编译步骤，禁止直接跳过。",
             "9. run_test 是唯一允许的测试步骤，编译成功后必须执行。",
             "10. run_command 只能用于白名单命令，不允许危险命令。",
@@ -104,17 +104,32 @@ class RepairAgent:
             "1. 先检索相关技能，再做工具调用。\n"
             "2. 如果 FrameContexts 非空，必须先读取并理解相关函数体，再决定修改。\n"
             "3. 当 traceback 对应的业务函数已经通过 FrameContexts / read_symbol_at / read_code 完整暴露，并且错误点可直接从源码中判断时，应停止继续收集信息，直接输出修复方案并调用 edit_code。\n"
+            "4. edit_code 的 content 必须使用统一 diff/patch 格式，禁止输出整文件全文。\n"
+            "5. patch 应尽量只覆盖 traceback 命中的函数或最小相关代码块；通常只包含一个 hunk。\n"
+            "6. patch 示例：--- a/src/main/java/X.java\\n+++ b/src/main/java/X.java\\n@@\\n-        badLine();\\n+        fixedLine();\n"
+            "6. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
+            "7. 不能在有 file:line 的情况下直接读取整个大文件。\n"
+            "8. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。\n"
+            "9. 修改代码前必须至少读取相关函数代码。\n"
+            "10. 允许多步工具调用，但最多自动修复 3 轮。\n"
+            "11. 任何修改后都必须执行编译。\n"
+            "12. 编译成功后必须执行测试。\n"
+            "13. 禁止跳过 compile。\n"
+            "14. 禁止跳过 test。\n"
+            "15. 禁止自动合并 PR。\n"
+            "16. 成功后进入创建 PR 流程，失败后发送飞书求助。\n"
             "4. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
-            "5. 不能在有 file:line 的情况下直接读取整个大文件。\n"
-            "6. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。\n"
-            "7. 修改代码前必须至少读取相关函数代码。\n"
-            "7. 允许多步工具调用，但最多自动修复 3 轮。\n"
-            "8. 任何修改后都必须执行编译。\n"
-            "9. 编译成功后必须执行测试。\n"
-            "10. 禁止跳过 compile。\n"
-            "11. 禁止跳过 test。\n"
-            "12. 禁止自动合并 PR。\n"
-            "13. 成功后进入创建 PR 流程，失败后发送飞书求助。\n"
+            "5. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
+            "6. 不能在有 file:line 的情况下直接读取整个大文件。\n"
+            "7. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。\n"
+            "8. 修改代码前必须至少读取相关函数代码。\n"
+            "9. 允许多步工具调用，但最多自动修复 3 轮。\n"
+            "10. 任何修改后都必须执行编译。\n"
+            "11. 编译成功后必须执行测试。\n"
+            "12. 禁止跳过 compile。\n"
+            "13. 禁止跳过 test。\n"
+            "14. 禁止自动合并 PR。\n"
+            "15. 成功后进入创建 PR 流程，失败后发送飞书求助。\n"
             "\n"
             f"BugEvent: {bug_event.model_dump_json()}\n"
             f"Skills: {json.dumps(skills, ensure_ascii=False)}\n"
@@ -288,11 +303,15 @@ class RepairAgent:
         return "E:/resourse/code/java/agent_test_1/agent_test_1/src/main/java/org/example/QuickSortWithBugLogFile.java"
 
     def _build_patch_content(self, target_path: str) -> str:
-        """为默认离线模式生成最小可编译补丁。"""
+        """为默认离线模式生成最小 unified diff 补丁。"""
         path = Path(target_path)
         if path.name == "QuickSortWithBugLogFile.java":
-            return path.read_text(encoding="utf-8").replace("int pivot = arr[right + 1];", "int pivot = arr[right];")
-        return path.read_text(encoding="utf-8")
+            return """--- a/src/main/java/org/example/QuickSortWithBugLogFile.java
++++ b/src/main/java/org/example/QuickSortWithBugLogFile.java
+@@
+-        int pivot = arr[right + 1];
++        int pivot = arr[right];"""
+        return ""
 
     def _run_compile(self) -> ToolResult:
         """强制执行编译步骤。"""
@@ -319,11 +338,18 @@ class RepairAgent:
         if not normalized.endswith(".java"):
             return False
         frame_contexts = session.get("frame_contexts", [])
-        if isinstance(frame_contexts, list):
+        if isinstance(frame_contexts, list) and frame_contexts:
             for context in frame_contexts:
                 if isinstance(context, dict) and str(context.get("filePath", "")).replace("\\", "/") == path.replace("\\", "/"):
                     return True
-        return False
+            return False
+
+        project_root = Path(self.config.project.root).resolve()
+        try:
+            patch_path = Path(path).resolve()
+        except OSError:
+            return False
+        return patch_path.is_relative_to(project_root)
 
     def _create_pr(self, task: RepairTask, bug_event: BugEvent) -> str:
         """进入创建 PR 流程但不自动合并。"""
