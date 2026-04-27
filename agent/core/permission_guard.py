@@ -16,8 +16,12 @@ class PermissionGuard:
     _FORBIDDEN_COMMAND_TOKENS = {"rm", "sudo", "chmod", "ssh", "scp"}
 
     def is_allowed(self, spec: ToolSpec) -> bool:
-        """根据工具声明判断是否无需额外审批。"""
-        return not spec.requires_approval
+        """根据权限类型判断工具是否属于默认可执行。"""
+        try:
+            permission = PermissionType(spec.permission)
+        except ValueError:
+            return False
+        return permission in {PermissionType.READ_ONLY, PermissionType.TEST_EXECUTION}
 
     def can_execute(self, spec: ToolSpec, context: ToolContext, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
         """检查当前上下文是否允许执行指定工具。"""

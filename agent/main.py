@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from agent.config import load_config
+import agent.config as config_module
 from agent.core.dedup_engine import DedupEngine
 from agent.core.permission_guard import PermissionGuard
 from agent.core.repair_agent import RepairAgent
@@ -20,6 +20,9 @@ from agent.reflection.reflection_subagent import ReflectionSubAgent
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.storage.task_store import TaskStore
+
+# 保留历史导出，兼容测试或外部 monkeypatch。
+load_config = config_module.load_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,7 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """根据命令行参数执行对应的代理流程。"""
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config("config.example.yaml")
+    config = config_module.load_config("config.example.yaml")
 
     registry = ToolRegistry()
     permission_guard = PermissionGuard()

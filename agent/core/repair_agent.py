@@ -214,11 +214,14 @@ class RepairAgent:
                 last_result = result
                 session["last_tool_result"] = result.model_dump()
                 self._save_session(bug_id, session)
-                if tool.spec.name == "edit_code" and result.success and self._is_valid_patch(result, session):
-                    modified = True
-                elif tool.spec.name == "edit_code" and result.success:
-                    session["last_error"] = {"tool": "edit_code", "error": "invalid patch target"}
-                    self._save_session(bug_id, session)
+                if tool.spec.name == "edit_code" and result.success:
+                    if not (result.data or {}).get("path"):
+                        modified = True
+                    elif self._is_valid_patch(result, session):
+                        modified = True
+                    else:
+                        session["last_error"] = {"tool": "edit_code", "error": "invalid patch target"}
+                        self._save_session(bug_id, session)
 
                 # 继续在当前轮次中等待 finish_patch，直到进入编译/测试阶段。
                 continue
