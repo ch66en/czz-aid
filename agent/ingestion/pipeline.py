@@ -3,6 +3,7 @@ from __future__ import annotations
 """定义从原始日志到修复入口的正式聚合流水线。"""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from agent.code_nav.ast_symbols import JavaAstSymbolExtractor
@@ -36,6 +37,7 @@ class IngestionPipeline:
         self.traceback_parser = traceback_parser or TracebackParser()
         self.repair_agent = repair_agent
         self.ast_extractor = JavaAstSymbolExtractor()
+        self.project_root = Path(getattr(getattr(self.repair_agent, "config", None), "project", None).root if getattr(getattr(self.repair_agent, "config", None), "project", None) else ".")
 
     def process(self, raw_text: str, bug_id: str, source: str, project: str, title: str = "", request_path: str = "", request_method: str = "", package_prefix: str | None = None) -> PipelineResult:
         """将原始日志处理成 BugEvent 并写入会话，必要时触发修复。"""
@@ -81,6 +83,7 @@ class IngestionPipeline:
         session_snapshot = self._load_session_snapshot(bug_id)
         if frame_contexts:
             session_snapshot = {**session_snapshot, "frame_contexts": frame_contexts}
+            self.session_store.put(bug_id, session_snapshot)
         repair_result = None
         if self.repair_agent is not None and not duplicate:
             repair_result = self.repair_agent.repair(bug_id)
@@ -99,7 +102,9 @@ class IngestionPipeline:
                 continue
             try:
                 path = self._resolve_source_path(frame.file_path)
-                if not path.exists():
+                print(f"[frame-context] frame={frame.file_path}:{frame.line_number} candidate_path={path}")
+                if path is None or not path.exists():
+                    print(f"[frame-context] skip missing source for {frame.file_path}:{frame.line_number}")
                     continue
                 symbol_at = self.ast_extractor.find_symbol_at(str(path), frame.line_number)
                 symbol = symbol_at["symbol"]
@@ -115,18 +120,25 @@ class IngestionPipeline:
                         "contentHash": symbol_at["contentHash"],
                     }
                 )
-            except Exception:
+            except Exception as exc:
+                print(f"[frame-context] failed for {frame.file_path}:{frame.line_number} error={exc}")
                 continue
         return contexts
 
-    def _resolve_source_path(self, file_path: str):
-        from pathlib import Path
-
+    def _resolve_source_path(self, file_path: str) -> Path | None:
         path = Path(file_path)
-        if path.exists():
+        if path.is_absolute() and path.exists():
             return path
-        candidate = Path(self.session_store.root_dir) / file_path if hasattr(self.session_store, "root_dir") else path
-        return candidate
+        candidates: list[Path] = []
+        if path.exists():
+            candidates.append(path)
+        if self.project_root.exists():
+            candidates.append(self.project_root / file_path)
+            candidates.extend(self.project_root.rglob(path.name))
+        for candidate in candidates:
+            if candidate.exists() and candidate.suffix.lower() == ".java":
+                return candidate
+        return None
 
     def _save_bug_event(self, bug_event: BugEvent, frame_contexts: list[dict[str, Any]] | None = None) -> None:
         """将 BugEvent 写入会话存储，供修复阶段读取。"""

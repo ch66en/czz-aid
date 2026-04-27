@@ -78,12 +78,14 @@ class JavaAstSymbolExtractor:
             for idx in range(target["startLine"] - 1, min(target["endLine"], len(source_lines)))
         ]
         raw_code = "\n".join(item["text"] for item in code_lines)
-        return {
+        result = {
             "filePath": str(path),
             "symbol": target,
             "code": code_lines,
             "contentHash": self._content_hash(raw_code),
         }
+        print(f"[ast-symbol] file={path} line={line} target={target['name']} {target['startLine']}-{target['endLine']}")
+        return result
 
     def _collect_symbols(self, path: Path, source: bytes, node: Any, parent: str | None = None) -> list[JavaSymbol]:
         symbols: list[JavaSymbol] = []
