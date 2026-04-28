@@ -14,6 +14,7 @@ from agent.core.task_manager import TaskManager
 from agent.core.tool_registry import ToolRegistry
 from agent.doctor.doctor import Doctor
 from agent.ingestion.pipeline import IngestionPipeline
+from agent.ingestion.log_watcher import LogWatcher
 from agent.ingestion.sanitizer import Sanitizer
 from agent.ingestion.traceback_parser import TracebackParser
 from agent.reflection.reflection_subagent import ReflectionSubAgent
@@ -76,7 +77,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(doctor.run())
         return 0
     if args.command == "watch":
-        print("watch mode started")
+        watcher = LogWatcher(
+            paths=config.agent.watch_paths,
+            pipeline=pipeline,
+            project=config.project.name,
+            package_prefix=getattr(config.project, "package_prefix", None),
+        )
+        watcher.watch()
         return 0
     if args.command == "repair":
         raw_log = args.raw_log
@@ -92,7 +99,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_method=args.request_method,
             package_prefix=args.package_prefix or None,
         )
-        print(result.repair_result or result)
+        if result.repair_result is not None:
+            repair_result = result.repair_result
+            print(f"repair status={repair_result.status} success={repair_result.success} message={repair_result.message}")
+            if repair_result.last_result is not None:
+                last = repair_result.last_result
+                print(f"last tool={last.tool} success={last.success} exit_code={last.exit_code}")
+                if last.stderr_summary:
+                    print(f"last error={last.stderr_summary}")
+        else:
+            print(result)
         return 0
     if args.command == "reflect":
         print(reflection.reflect(args.bug_id, args.result))

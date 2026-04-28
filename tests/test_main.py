@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from agent.config import AppConfig
 from agent.main import main
 
 
@@ -35,3 +36,40 @@ def test_repair_reads_log_from_path(tmp_path: Path, monkeypatch) -> None:
     exit_code = main(["repair", "--bug-id", "BUG-1", "--raw-log-path", str(log_path), "--project", "demo"])
 
     assert exit_code == 0
+
+
+def test_watch_starts_log_watcher_with_config(monkeypatch) -> None:
+    from agent import main as main_module
+
+    config = AppConfig()
+    config.project.name = "order-service"
+    config.agent.watch_paths = ["./runtime/app.log"]
+    created: dict[str, object] = {}
+
+    class FakeWatcher:
+        def __init__(self, **kwargs) -> None:
+            created.update(kwargs)
+
+        def watch(self) -> str:
+            created["watched"] = True
+            return "watching"
+
+    monkeypatch.setattr(main_module, "load_config", lambda _: config)
+    monkeypatch.setattr(main_module, "ToolRegistry", lambda: type("R", (), {"get": lambda self, name: None, "register": lambda self, tool: None, "list_tools": lambda self: []})())
+    monkeypatch.setattr(main_module, "PermissionGuard", lambda: object())
+    monkeypatch.setattr(main_module, "TaskStore", lambda: object())
+    monkeypatch.setattr(main_module, "SessionStore", lambda: object())
+    monkeypatch.setattr(main_module, "SkillStore", lambda: object())
+    monkeypatch.setattr(main_module, "TaskManager", lambda task_store: type("M", (), {"create_task": lambda self, bug_id: None, "update_status": lambda self, bug_id, status: None})())
+    monkeypatch.setattr(main_module, "RepairAgent", lambda **kwargs: type("A", (), {"repair": lambda self, bug_id: None})())
+    monkeypatch.setattr(main_module, "IngestionPipeline", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "Doctor", lambda config: type("D", (), {"run": lambda self: "doctor"})())
+    monkeypatch.setattr(main_module, "ReflectionSubAgent", lambda **kwargs: type("R", (), {"reflect": lambda self, bug_id, result: "reflection"})())
+    monkeypatch.setattr(main_module, "LogWatcher", FakeWatcher)
+
+    exit_code = main(["watch"])
+
+    assert exit_code == 0
+    assert created["paths"] == ["./runtime/app.log"]
+    assert created["project"] == "order-service"
+    assert created["watched"] is True

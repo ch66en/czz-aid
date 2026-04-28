@@ -11,6 +11,11 @@ from agent.models import StackFrame
 
 _FRAME_PATTERN = re.compile(r"^at\s+(?P<class_method>[\w.$<>]+)\((?P<source>[^)]*)\)$")
 _EXCEPTION_PATTERN = re.compile(r"^(?P<type>[\w.$]+)(?::\s*(?P<message>.*))?$")
+_EXCEPTION_START_SEARCH = re.compile(
+    r'(?:Exception in thread "[^"]+"\s+)?'
+    r"(?P<type>(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Exception|Error|Throwable))"
+    r"(?:[:\s].*)?"
+)
 
 _FRAMEWORK_PREFIXES = (
     "java.",
@@ -48,6 +53,7 @@ class TracebackParser:
                 normalized_trace="",
             )
 
+        lines = self._trim_to_exception(lines)
         exception_type, message = self._parse_exception_header(lines[0])
         frames = self._parse_frames(lines[1:])
         top_business = self._find_top_business_frame(frames, package_prefix)
@@ -66,6 +72,14 @@ class TracebackParser:
         if not match:
             return "UnknownError", line.strip()
         return match.group("type"), match.group("message") or ""
+
+    def _trim_to_exception(self, lines: list[str]) -> list[str]:
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            match = _EXCEPTION_START_SEARCH.search(stripped)
+            if match:
+                return [stripped[match.start("type") :], *lines[index + 1 :]]
+        return lines
 
     def _parse_frames(self, lines: Iterable[str]) -> list[StackFrame]:
         """解析异常栈中的每个堆栈帧。"""

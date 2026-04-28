@@ -3,9 +3,14 @@ from __future__ import annotations
 """实现带粗流程约束的修复代理运行时。"""
 
 import json
+import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+import requests
 
 from agent.config import AppConfig
 from agent.core.permission_guard import PermissionGuard
@@ -159,12 +164,15 @@ class RepairAgent:
         history: list[dict[str, Any]] = []
         last_result: ToolResult | None = None
 
-        for _ in range(3):
+        print(f"[repair] start bug_id={bug_id} exception={bug_event.exception_type}", flush=True)
+        for attempt in range(1, self.config.agent.max_retry + 1):
+            print(f"[repair] attempt={attempt} bug_id={bug_id}", flush=True)
             modified = False
             while True:
-                action = self._ask_llm(prompt_template, history)
+                action = self._ask_llm(prompt_template, history, bug_event, session)
                 history.append(action)
                 tool_name = str(action.get("tool", ""))
+                print(f"[repair] action tool={tool_name} reason={action.get('reason', '')}", flush=True)
                 if tool_name == "finish_patch":
                     if not modified:
                         last_result = ToolResult(tool="finish_patch", success=False, exit_code=1, stdout_summary="no patch produced", stderr_summary="", data={}, artifacts=[])
@@ -175,6 +183,7 @@ class RepairAgent:
                     history.append({"tool": "RunCompileTool", "result": compile_result.model_dump()})
                     session["compile_result"] = compile_result.model_dump()
                     self._save_session(bug_id, session)
+                    print(f"[repair] compile success={compile_result.success} exit_code={compile_result.exit_code}", flush=True)
                     if not compile_result.success:
                         last_result = compile_result
                         break
@@ -182,15 +191,26 @@ class RepairAgent:
                     history.append({"tool": "RunTestTool", "result": test_result.model_dump()})
                     session["test_result"] = test_result.model_dump()
                     self._save_session(bug_id, session)
+                    print(f"[repair] test success={test_result.success} exit_code={test_result.exit_code}", flush=True)
                     if not test_result.success:
                         last_result = test_result
                         break
-                    pr_url = self._create_pr(task, bug_event)
-                    history.append({"tool": "CreatePR", "result": {"pr_url": pr_url, "status": "passed"}})
+                    pr_result = self._create_pr(task, bug_event, history)
+                    history.append({"tool": "CreatePR", "result": pr_result.model_dump()})
+                    session["create_pr_result"] = pr_result.model_dump()
+                    self._save_session(bug_id, session)
+                    if not pr_result.success:
+                        last_result = pr_result
+                        self.task_manager.update_status(bug_id, TaskStatus.FAILED)
+                        self._send_feishu_help(bug_event, session, last_result)
+                        print(f"[repair] create_pr failed bug_id={bug_id} error={pr_result.stderr_summary}", flush=True)
+                        return RepairRunResult(False, "failed", "create pr failed", task=task, last_result=pr_result, prompt_template=prompt_template, history=history)
+                    pr_url = str(pr_result.data.get("pr_url") or pr_result.stdout_summary)
                     task.pr_url = pr_url
                     task.status = TaskStatus.PASSED
                     self.task_manager.update_status(bug_id, TaskStatus.PASSED)
                     self._save_session(bug_id, {**session, "pr_url": pr_url, "status": "passed"})
+                    print(f"[repair] passed bug_id={bug_id} pr_url={pr_url}", flush=True)
                     return RepairRunResult(True, "passed", "repair succeeded", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
 
                 tool = self.registry.get(tool_name.lower()) or self.registry.get(tool_name)
@@ -207,6 +227,7 @@ class RepairAgent:
                     history.append({"tool": tool.spec.name, "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
                     self._save_session(bug_id, session)
+                    print(f"[repair] denied tool={tool.spec.name} reason={reason}", flush=True)
                     continue
 
                 result = tool.run(action.get("arguments", {}))
@@ -214,11 +235,13 @@ class RepairAgent:
                 last_result = result
                 session["last_tool_result"] = result.model_dump()
                 self._save_session(bug_id, session)
+                print(f"[repair] tool={tool.spec.name} success={result.success} exit_code={result.exit_code}", flush=True)
                 if tool.spec.name == "edit_code" and result.success and self._is_valid_patch(result, session):
                     modified = True
                 elif tool.spec.name == "edit_code" and result.success:
                     session["last_error"] = {"tool": "edit_code", "error": "invalid patch target"}
                     self._save_session(bug_id, session)
+                    print("[repair] invalid patch target", flush=True)
 
                 # 继续在当前轮次中等待 finish_patch，直到进入编译/测试阶段。
                 continue
@@ -228,6 +251,7 @@ class RepairAgent:
 
         self.task_manager.update_status(bug_id, TaskStatus.FAILED)
         self._send_feishu_help(bug_event, session, last_result)
+        print(f"[repair] failed bug_id={bug_id} message=auto repair exhausted", flush=True)
         return RepairRunResult(False, "failed", "auto repair exhausted", task=task, last_result=last_result, prompt_template=prompt_template, history=history)
 
     def _load_bug_event(self, bug_id: str) -> BugEvent:
@@ -270,12 +294,14 @@ class RepairAgent:
                     skills.append(value)
         return skills
 
-    def _ask_llm(self, prompt_template: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+    def _ask_llm(self, prompt_template: str, history: list[dict[str, Any]], bug_event: BugEvent, session: dict[str, Any]) -> dict[str, Any]:
         """请求 LLM 输出下一步动作。"""
         if self.llm_client is None:
             if not any(item.get("tool") == "edit_code" for item in history):
-                target_path = self._pick_patch_target(prompt_template)
+                target_path = self._pick_patch_target(bug_event, session)
                 content = self._build_patch_content(target_path)
+                if not content:
+                    return {"tool": "finish_patch", "arguments": {}, "reason": f"no local patch rule for {target_path}"}
                 return {"tool": "edit_code", "arguments": {"path": target_path, "content": content}, "reason": "create patch"}
             return {"tool": "finish_patch", "arguments": {}, "reason": "done"}
         messages = [
@@ -294,24 +320,81 @@ class RepairAgent:
                 return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm output"}
         return {"tool": "finish_patch", "arguments": {}, "reason": "no llm output"}
 
-    def _pick_patch_target(self, prompt_template: str) -> str:
+    def _pick_patch_target(self, bug_event: BugEvent, session: dict[str, Any]) -> str:
         """从上下文中选择真实源码文件作为补丁目标。"""
-        if "QuickSortWithBugLogFile.java" in prompt_template:
-            return "E:/resourse/code/java/agent_test_1/agent_test_1/src/main/java/org/example/QuickSortWithBugLogFile.java"
-        if "Main.java" in prompt_template:
-            return "E:/resourse/code/java/agent_test_1/agent_test_1/src/main/java/org/example/Main.java"
-        return "E:/resourse/code/java/agent_test_1/agent_test_1/src/main/java/org/example/QuickSortWithBugLogFile.java"
+        frame_contexts = session.get("frame_contexts", [])
+        if isinstance(frame_contexts, list):
+            for context in frame_contexts:
+                if not isinstance(context, dict):
+                    continue
+                file_path = str(context.get("filePath", ""))
+                if file_path and file_path.endswith(".java") and Path(file_path).exists():
+                    return file_path
+
+        for frame in bug_event.frames:
+            resolved = self._resolve_project_source(frame.file_path)
+            if resolved is not None:
+                return str(resolved)
+
+        project_root = Path(self.config.project.root)
+        if project_root.exists():
+            for candidate in project_root.rglob("*.java"):
+                if candidate.name in bug_event.traceback:
+                    return str(candidate)
+        return str(project_root / "src/main/java")
+
+    def _resolve_project_source(self, file_path: str) -> Path | None:
+        path = Path(file_path)
+        if path.is_absolute() and path.exists():
+            return path
+
+        project_root = Path(self.config.project.root)
+        candidates: list[Path] = []
+        if path.exists():
+            candidates.append(path)
+        if project_root.exists():
+            candidates.append(project_root / file_path)
+            candidates.extend(project_root.rglob(path.name))
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.suffix.lower() == ".java":
+                return candidate
+        return None
 
     def _build_patch_content(self, target_path: str) -> str:
         """为默认离线模式生成最小 unified diff 补丁。"""
         path = Path(target_path)
         if path.name == "QuickSortWithBugLogFile.java":
-            return """--- a/src/main/java/org/example/QuickSortWithBugLogFile.java
-+++ b/src/main/java/org/example/QuickSortWithBugLogFile.java
-@@
--        int pivot = arr[right + 1];
-+        int pivot = arr[right];"""
+            return self._build_quicksort_patch(path)
         return ""
+
+    def _build_quicksort_patch(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+
+        pivot_line = ""
+        log_line = ""
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if re.search(r"\bint\s+pivot\s*=\s*arr\s*\[\s*right\s*\+\s*1\s*\]\s*;", line):
+                pivot_line = line
+            elif "log(" in line and "pivot" in line and re.search(r"\(\s*right\s*\+\s*1\s*\)", line):
+                log_line = line
+
+        if not pivot_line:
+            return ""
+
+        indent = pivot_line[: len(pivot_line) - len(pivot_line.lstrip())]
+        lines = [
+            "--- a/src/main/java/org/example/QuickSortWithBugLogFile.java",
+            "+++ b/src/main/java/org/example/QuickSortWithBugLogFile.java",
+            "@@",
+            f"-{pivot_line}",
+            f"+{indent}int pivot = arr[right];",
+        ]
+        if log_line:
+            new_log_line = re.sub(r"\(\s*right\s*\+\s*1\s*\)", "right", log_line, count=1)
+            lines.extend([f"-{log_line}", f"+{new_log_line}"])
+        return "\n".join(lines)
 
     def _run_compile(self) -> ToolResult:
         """强制执行编译步骤。"""
@@ -339,9 +422,17 @@ class RepairAgent:
             return False
         frame_contexts = session.get("frame_contexts", [])
         if isinstance(frame_contexts, list) and frame_contexts:
+            patch_path = Path(path)
             for context in frame_contexts:
-                if isinstance(context, dict) and str(context.get("filePath", "")).replace("\\", "/") == path.replace("\\", "/"):
-                    return True
+                if not isinstance(context, dict):
+                    continue
+                context_path = str(context.get("filePath", ""))
+                try:
+                    if Path(context_path).resolve() == patch_path.resolve():
+                        return True
+                except OSError:
+                    if context_path.replace("\\", "/").lower() == path.replace("\\", "/").lower():
+                        return True
             return False
 
         project_root = Path(self.config.project.root).resolve()
@@ -351,11 +442,145 @@ class RepairAgent:
             return False
         return patch_path.is_relative_to(project_root)
 
-    def _create_pr(self, task: RepairTask, bug_event: BugEvent) -> str:
-        """进入创建 PR 流程但不自动合并。"""
-        pr_url = f"https://gitee.example/{bug_event.project}/pulls/{task.id}"
+    def _create_pr(self, task: RepairTask, bug_event: BugEvent, history: list[dict[str, Any]]) -> ToolResult:
+        """Create a real branch, push it, and open a Gitee pull request."""
+        project_root = Path(self.config.project.root).resolve()
+        branch = self._repair_branch_name(bug_event.bug_id)
+        base_branch = self.config.project.default_branch
+        edited_paths = self._edited_paths_from_history(history, project_root)
+        if not edited_paths:
+            return self._pr_error("no edited files to commit", branch=branch)
+
+        owner, repo = self._resolve_gitee_repo(project_root)
+        token = self.config.gitee.token.strip()
+        if not token or token == "your-gitee-token":
+            return self._pr_error("missing gitee token", branch=branch, owner=owner, repo=repo)
+        if not owner or not repo or owner == "your-owner" or repo == "your-repo":
+            return self._pr_error("missing gitee owner/repo", branch=branch, owner=owner, repo=repo)
+
+        commands = [
+            ["git", "checkout", "-B", branch],
+            ["git", "add", *[str(path.relative_to(project_root)) for path in edited_paths]],
+            ["git", "commit", "-m", f"fix: auto repair {bug_event.bug_id}"],
+            ["git", "push", "-u", "origin", branch],
+        ]
+        command_output: list[str] = []
+        for command in commands:
+            result = self._run_git(project_root, command)
+            command_output.append(f"$ {' '.join(command)}\n{result.stdout}\n{result.stderr}".strip())
+            if result.returncode != 0:
+                if command[:2] == ["git", "commit"] and "nothing to commit" in f"{result.stdout}\n{result.stderr}".lower():
+                    return self._pr_error("no git changes to commit", branch=branch, owner=owner, repo=repo, stdout="\n\n".join(command_output))
+                return self._pr_error(f"git command failed: {' '.join(command)}", branch=branch, owner=owner, repo=repo, stdout="\n\n".join(command_output))
+
+        pr_response = self._create_gitee_pull_request(owner, repo, branch, base_branch, bug_event)
+        if not pr_response.success:
+            pr_response.stdout_summary = "\n\n".join(command_output)
+            return pr_response
+
+        pr_url = str(pr_response.data.get("pr_url") or pr_response.stdout_summary)
+        task.agent_branch = branch
+        task.base_branch = base_branch
         self.session_store.put(f"pr:{task.id}", pr_url)
-        return pr_url
+        session = self.session_store.get(task.bug_id)
+        self.session_store.put(
+            task.bug_id,
+            {
+                **(session if isinstance(session, dict) else {}),
+                "agent_branch": branch,
+                "base_branch": base_branch,
+                "pr_url": pr_url,
+            },
+        )
+        return ToolResult(
+            tool="create_pr",
+            success=True,
+            exit_code=0,
+            stdout_summary=pr_url,
+            stderr_summary="",
+            data={"pr_url": pr_url, "branch": branch, "base_branch": base_branch, "owner": owner, "repo": repo},
+            artifacts=[],
+        )
+
+    def _run_git(self, cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, shell=False, check=False)
+
+    def _edited_paths_from_history(self, history: list[dict[str, Any]], project_root: Path) -> list[Path]:
+        paths: list[Path] = []
+        for item in history:
+            if item.get("tool") != "edit_code":
+                continue
+            result = item.get("result")
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            raw_paths = list(result.get("artifacts") or [])
+            data_path = result.get("data", {}).get("path") if isinstance(result.get("data"), dict) else None
+            if data_path:
+                raw_paths.append(data_path)
+            for raw_path in raw_paths:
+                try:
+                    path = Path(str(raw_path)).resolve()
+                    path.relative_to(project_root)
+                except (OSError, ValueError):
+                    continue
+                if path.is_file() and path not in paths:
+                    paths.append(path)
+        return paths
+
+    def _resolve_gitee_repo(self, project_root: Path) -> tuple[str, str]:
+        owner = self.config.gitee.owner.strip()
+        repo = self.config.gitee.repo.strip()
+        if owner and repo and owner != "your-owner" and repo != "your-repo":
+            return owner, repo
+
+        remote = self._run_git(project_root, ["git", "remote", "get-url", "origin"])
+        if remote.returncode != 0:
+            return owner, repo
+        parsed_owner, parsed_repo = self._parse_gitee_remote(remote.stdout.strip())
+        return owner if owner and owner != "your-owner" else parsed_owner, repo if repo and repo != "your-repo" else parsed_repo
+
+    def _parse_gitee_remote(self, remote_url: str) -> tuple[str, str]:
+        if remote_url.startswith("git@"):
+            match = re.search(r"gitee\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$", remote_url)
+            return (match.group("owner"), match.group("repo")) if match else ("", "")
+        parsed = urlparse(remote_url)
+        parts = [part for part in parsed.path.strip("/").split("/") if part]
+        if len(parts) >= 2:
+            repo = parts[1][:-4] if parts[1].endswith(".git") else parts[1]
+            return parts[0], repo
+        return "", ""
+
+    def _create_gitee_pull_request(self, owner: str, repo: str, branch: str, base_branch: str, bug_event: BugEvent) -> ToolResult:
+        url = f"{self.config.gitee.base_url.rstrip('/')}/repos/{owner}/{repo}/pulls"
+        payload = {
+            "access_token": self.config.gitee.token.strip(),
+            "title": f"[auto-fix] {bug_event.exception_type or bug_event.bug_id}",
+            "head": branch,
+            "base": base_branch,
+            "body": (
+                f"Auto repair for `{bug_event.bug_id}`.\n\n"
+                f"Exception: `{bug_event.exception_type}`\n\n"
+                f"Top frame: `{bug_event.top_business_frame}`"
+            ),
+        }
+        try:
+            response = requests.post(url, data=payload, timeout=30)
+        except requests.RequestException as exc:
+            return self._pr_error(f"gitee request failed: {exc}", branch=branch, owner=owner, repo=repo)
+        if response.status_code >= 400:
+            return self._pr_error(f"gitee pr create failed: HTTP {response.status_code} {response.text[:500]}", branch=branch, owner=owner, repo=repo)
+        data = response.json() if response.content else {}
+        pr_url = str(data.get("html_url") or data.get("url") or data.get("number") or "")
+        if not pr_url:
+            return self._pr_error("gitee response missing pr url", branch=branch, owner=owner, repo=repo)
+        return ToolResult(tool="create_pr", success=True, exit_code=0, stdout_summary=pr_url, stderr_summary="", data={"pr_url": pr_url, "branch": branch}, artifacts=[])
+
+    def _repair_branch_name(self, bug_id: str) -> str:
+        safe_bug_id = re.sub(r"[^A-Za-z0-9._-]+", "-", bug_id).strip("-").lower() or "bug"
+        return f"agent-fix/{safe_bug_id}"
+
+    def _pr_error(self, message: str, **data: Any) -> ToolResult:
+        return ToolResult(tool="create_pr", success=False, exit_code=1, stdout_summary=str(data.pop("stdout", "")), stderr_summary=message, data=data, artifacts=[])
 
     def _send_feishu_help(self, bug_event: BugEvent, session: dict[str, Any], last_result: ToolResult | None) -> None:
         """失败后记录飞书求助信息。"""

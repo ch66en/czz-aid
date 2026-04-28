@@ -1,20 +1,20 @@
 env: dev
-workspace: E:\resourse\code\java\agent_test_1\agent_test_1
+workspace: E:\Project\agent_test_1
 project:
   name: agent_test_1
-  root: E:\resourse\code\java\agent_test_1\agent_test_1
+  root: E:\Project\agent_test_1
   language: java
   default_branch: master
 llm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: sk-a377284bdcc442b68fdedcab70d9335e
+  api_key: 
   model: qwen3.6-plus
   timeout_seconds: 60
 gitee:
   base_url: https://gitee.com/api/v5
-  token: your-gitee-token
-  owner: your-owner
-  repo: your-repo
+  token: 
+  owner: Zzzztide
+  repo: agent_test_1
 feishu:
   webhook: ""
   app_id: ""
@@ -28,5 +28,5 @@ agent:
   max_retry: 3
   reflection_enabled: true
   review_required: true
-  watch_paths:
-    - ./logs
+  watch_paths: 
+    - "E:\\Project\\agent_test_1\\quick-sort.log"

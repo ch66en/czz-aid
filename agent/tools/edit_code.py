@@ -31,7 +31,12 @@ class EditCodeTool(BaseTool):
 
         if self._looks_like_unified_diff(content):
             original = path.read_text(encoding="utf-8") if path.exists() else ""
-            patched = self._apply_simple_unified_diff(original, content)
+            try:
+                patched = self._apply_simple_unified_diff(original, content)
+            except ValueError as exc:
+                return ToolResult(tool="edit_code", success=False, exit_code=1, stdout_summary=str(path), stderr_summary=str(exc), data={"path": str(path)}, artifacts=[str(path)])
+            if patched == original:
+                return ToolResult(tool="edit_code", success=False, exit_code=1, stdout_summary=str(path), stderr_summary="patch did not change file", data={"path": str(path)}, artifacts=[str(path)])
             path.write_text(patched, encoding="utf-8")
         else:
             path.write_text(content, encoding="utf-8")
@@ -60,10 +65,14 @@ class EditCodeTool(BaseTool):
                 removed.append(line[1:])
 
         if removed and removed[0] == "pass" and added:
+            if "pass" not in original:
+                raise ValueError("patch context not found: pass")
             return original.replace("pass", "\n".join(added), 1)
         if removed and added and len(removed) == len(added):
             patched = original
             for old, new in zip(removed, added):
+                if old not in patched:
+                    raise ValueError(f"patch context not found: {old}")
                 patched = patched.replace(old, new, 1)
             return patched
-        return original
+        raise ValueError("unsupported or empty unified diff")
