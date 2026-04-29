@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from agent.config import AppConfig
 from agent.code_nav.ast_symbols import JavaAstSymbolExtractor
 from agent.tools.read_code import ReadCodeTool
 
@@ -58,3 +59,19 @@ def test_read_code_large_file_requires_range(tmp_path: Path) -> None:
 
     assert result.success is False
     assert "ast_symbols" in result.stderr_summary or "read_symbol_at" in result.stderr_summary
+
+
+def test_read_code_resolves_relative_path_from_project_root(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    source = project_root / "src" / "main" / "java" / "Demo.java"
+    source.parent.mkdir(parents=True)
+    source.write_text("class Demo {}\n", encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(project_root)
+    tool = ReadCodeTool(config)
+
+    result = tool.run({"path": "src/main/java/Demo.java"})
+
+    assert result.success is True
+    assert result.data["path"] == str(source)
+    assert "class Demo" in result.data["content"]

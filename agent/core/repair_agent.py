@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -25,6 +25,7 @@ from agent.tools.base import ToolContext
 from agent.tools.ast_symbols_tool import AstSymbolsTool
 from agent.tools.compile_tool import RunCompileTool
 from agent.tools.edit_code import EditCodeTool
+from agent.tools.feishu_tool import FeishuTool
 from agent.tools.git_diff import GitDiffTool
 from agent.tools.read_code import ReadCodeTool
 from agent.tools.read_symbol_at_tool import ReadSymbolAtTool
@@ -75,9 +76,9 @@ class RepairAgent:
         for tool in [
             AstSymbolsTool(),
             ReadSymbolAtTool(),
-            ReadCodeTool(),
+            ReadCodeTool(self.config),
             SearchCodeTool(),
-            EditCodeTool(),
+            EditCodeTool(self.config),
             RunCommandTool(self.config),
             GitDiffTool(),
             RunCompileTool(self.config),
@@ -233,9 +234,18 @@ class RepairAgent:
                         return RepairRunResult(False, "failed", "create pr failed", task=task, last_result=pr_result, prompt_template=prompt_template, history=history)
                     pr_url = str(pr_result.data.get("pr_url") or pr_result.stdout_summary)
                     task.pr_url = pr_url
+                    session = {**session, "pr_url": pr_url, "status": "passed"}
+                    review_result = self._send_feishu_review_request(task, bug_event, session, pr_result, compile_result, test_result)
+                    if self.config.agent.review_required:
+                        task.status = TaskStatus.REVIEWING
+                        self.task_manager.update_status(bug_id, TaskStatus.REVIEWING)
+                        session["status"] = "reviewing"
+                        self._save_session(bug_id, session)
+                        print(f"[repair] review requested bug_id={bug_id} pr_url={pr_url} feishu_success={review_result.success}", flush=True)
+                        return RepairRunResult(True, "reviewing", "repair succeeded; review requested", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
                     task.status = TaskStatus.PASSED
                     self.task_manager.update_status(bug_id, TaskStatus.PASSED)
-                    self._save_session(bug_id, {**session, "pr_url": pr_url, "status": "passed"})
+                    self._save_session(bug_id, session)
                     print(f"[repair] passed bug_id={bug_id} pr_url={pr_url}", flush=True)
                     return RepairRunResult(True, "passed", "repair succeeded", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
 
@@ -645,6 +655,68 @@ class RepairAgent:
     def _pr_error(self, message: str, **data: Any) -> ToolResult:
         return ToolResult(tool="create_pr", success=False, exit_code=1, stdout_summary=str(data.pop("stdout", "")), stderr_summary=message, data=data, artifacts=[])
 
-    def _send_feishu_help(self, bug_event: BugEvent, session: dict[str, Any], last_result: ToolResult | None) -> None:
+    def _send_feishu_review_request(self, task: RepairTask, bug_event: BugEvent, session: dict[str, Any], pr_result: ToolResult, compile_result: ToolResult, test_result: ToolResult) -> ToolResult:
+        """Notify Feishu that a validated PR is waiting for human review."""
+        if not self.config.agent.review_required:
+            result = ToolResult(tool="feishu_tool", success=True, exit_code=0, stdout_summary="review notification skipped", stderr_summary="", data={"skipped": True}, artifacts=[])
+            session["feishu_review_result"] = result.model_dump()
+            self._save_session(bug_event.bug_id, session)
+            return result
+        pr_url = str(pr_result.data.get("pr_url") or pr_result.stdout_summary)
+        payload = {
+            "action": "send_review_request_card",
+            "args": {
+                "bug": bug_event.model_dump(mode="json"),
+                "bug_id": bug_event.bug_id,
+                "task_id": task.id,
+                "pr_url": pr_url,
+                "agent_branch": str(pr_result.data.get("branch") or task.agent_branch),
+                "base_branch": str(pr_result.data.get("base_branch") or task.base_branch),
+                "compile_result": compile_result.model_dump(),
+                "test_result": test_result.model_dump(),
+                "create_pr_result": pr_result.model_dump(),
+                **self._review_callback_urls(bug_event.bug_id),
+            },
+        }
+        result = self._run_feishu_tool(payload)
+        session["feishu_review_payload"] = payload
+        session["feishu_review_result"] = result.model_dump()
+        self._save_session(bug_event.bug_id, session)
+        print(f"[repair] feishu review success={result.success} dry_run={result.data.get('dry_run')}", flush=True)
+        return result
+
+    def _send_feishu_help(self, bug_event: BugEvent, session: dict[str, Any], last_result: ToolResult | None) -> ToolResult:
         """失败后记录飞书求助信息。"""
-        self.session_store.put(f"feishu_help:{bug_event.bug_id}", {"bug": bug_event.model_dump(), "session": session, "last_result": last_result.model_dump() if last_result else None})
+        payload = {
+            "action": "send_help_card",
+            "args": {
+                "bug": bug_event.model_dump(mode="json"),
+                "last_result": last_result.model_dump() if last_result else {},
+                "session_path": bug_event.bug_id,
+            },
+        }
+        result = self._run_feishu_tool(payload)
+        record = {"bug": bug_event.model_dump(mode="json"), "session": session, "last_result": last_result.model_dump() if last_result else None, "feishu_result": result.model_dump()}
+        self.session_store.put(f"feishu_help:{bug_event.bug_id}", record)
+        session["feishu_help_payload"] = payload
+        session["feishu_help_result"] = result.model_dump()
+        self._save_session(bug_event.bug_id, session)
+        print(f"[repair] feishu help success={result.success} dry_run={result.data.get('dry_run')}", flush=True)
+        return result
+
+    def _run_feishu_tool(self, payload: dict[str, Any]) -> ToolResult:
+        tool = self.registry.get("feishu_tool") or FeishuTool(self.config)
+        try:
+            return tool.run(payload)
+        except Exception as exc:
+            return ToolResult(tool="feishu_tool", success=False, exit_code=1, stdout_summary="", stderr_summary=str(exc), data={"payload": payload}, artifacts=[])
+
+    def _review_callback_urls(self, bug_id: str) -> dict[str, str]:
+        if self.config.feishu.review_callback_mode != "local":
+            return {}
+        base_url = self.config.feishu.review_callback_base_url.rstrip("/")
+        if not base_url:
+            return {}
+        passed = urlencode({"event_type": "review_passed", "bug_id": bug_id})
+        failed = urlencode({"event_type": "review_failed", "bug_id": bug_id})
+        return {"review_pass_url": f"{base_url}/review?{passed}", "review_fail_url": f"{base_url}/review?{failed}"}

@@ -7,7 +7,7 @@ from agent.core.permission_guard import PermissionGuard
 from agent.core.repair_agent import RepairAgent
 from agent.core.task_manager import TaskManager
 from agent.core.tool_registry import ToolRegistry
-from agent.models import BugEvent, StackFrame, ToolResult
+from agent.models import BugEvent, RepairTask, StackFrame, ToolResult
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 
@@ -27,6 +27,24 @@ class FakeTool:
 
     def run(self, payload: dict[str, object] | None = None) -> ToolResult:
         return self._result
+
+
+class RecordingFeishuTool:
+    def __init__(self) -> None:
+        self.payloads: list[dict[str, object]] = []
+        self._spec = SimpleNamespace(name="feishu_tool", permission="EXTERNAL_NOTIFY", description="feishu", input_schema={}, executor="local")
+
+    @property
+    def spec(self) -> SimpleNamespace:
+        return self._spec
+
+    @property
+    def permission(self) -> str:
+        return self._spec.permission
+
+    def run(self, payload: dict[str, object] | None = None) -> ToolResult:
+        self.payloads.append(payload or {})
+        return ToolResult(tool="feishu_tool", success=True, exit_code=0, stdout_summary="sent", stderr_summary="", data={"dry_run": False}, artifacts=[])
 
 
 def test_repair_agent_builds_prompt_template() -> None:
@@ -105,6 +123,7 @@ def test_repair_agent_requires_compile_and_test_after_finish_patch(tmp_path: Pat
     assert result.last_result is not None
     assert result.last_result.tool == "run_test"
     assert session_store.get("pr:") is None
+    assert session_store.get("BUG-1")["feishu_review_result"]["success"] is True
 
 
 def test_repair_agent_builds_patch_from_current_source_spacing(tmp_path: Path) -> None:
@@ -150,3 +169,40 @@ def test_repair_agent_create_pr_requires_real_token(tmp_path: Path) -> None:
 
     assert result.success is False
     assert result.stderr_summary == "missing gitee token"
+
+
+def test_repair_agent_sends_feishu_help_on_failure() -> None:
+    config = AppConfig()
+    registry = ToolRegistry()
+    feishu = RecordingFeishuTool()
+    registry.register(feishu)
+    session_store = SessionStore()
+    agent = RepairAgent(config, registry, PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), session_store, SkillStore())
+    bug_event = BugEvent(bug_id="BUG-H", source="log", project="demo", title="NPE", exception_type="NullPointerException", message="x", top_business_frame="Demo.java:1", fingerprint="fp")
+    last_result = ToolResult(tool="run_test", success=False, exit_code=1, stderr_summary="test failed", data={}, artifacts=[])
+
+    result = agent._send_feishu_help(bug_event, {}, last_result)
+
+    assert result.success is True
+    assert feishu.payloads[0]["action"] == "send_help_card"
+    assert session_store.get("feishu_help:BUG-H")["feishu_result"]["success"] is True
+
+
+def test_repair_agent_sends_feishu_review_request() -> None:
+    config = AppConfig()
+    registry = ToolRegistry()
+    feishu = RecordingFeishuTool()
+    registry.register(feishu)
+    session_store = SessionStore()
+    agent = RepairAgent(config, registry, PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), session_store, SkillStore())
+    task = RepairTask(bug_id="BUG-R", project="demo", agent_branch="agent-fix/bug-r", base_branch="main")
+    bug_event = BugEvent(bug_id="BUG-R", source="log", project="demo", title="NPE", exception_type="NullPointerException", message="x", top_business_frame="Demo.java:1", fingerprint="fp")
+    pr_result = ToolResult(tool="create_pr", success=True, exit_code=0, stdout_summary="https://gitee.test/pr/1", data={"pr_url": "https://gitee.test/pr/1", "branch": "agent-fix/bug-r", "base_branch": "main"}, artifacts=[])
+    compile_result = ToolResult(tool="run_compile", success=True, exit_code=0, stdout_summary="compile ok", data={}, artifacts=[])
+    test_result = ToolResult(tool="run_test", success=True, exit_code=0, stdout_summary="test ok", data={}, artifacts=[])
+
+    result = agent._send_feishu_review_request(task, bug_event, {}, pr_result, compile_result, test_result)
+
+    assert result.success is True
+    assert feishu.payloads[0]["action"] == "send_review_request_card"
+    assert session_store.get("BUG-R")["feishu_review_result"]["success"] is True

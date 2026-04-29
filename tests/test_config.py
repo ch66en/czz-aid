@@ -36,6 +36,8 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
               repo: auto-fix-agent
             feishu:
               webhook: https://open.feishu.cn/webhook
+              review_callback_mode: local
+              review_callback_port: 8765
             session:
               root_dir: /tmp/sessions
             agent:
@@ -56,6 +58,8 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
     assert config.llm.api_key == "test-key"
     assert config.gitee.repo == "auto-fix-agent"
     assert config.feishu.webhook == "https://open.feishu.cn/webhook"
+    assert config.feishu.review_callback_mode == "local"
+    assert config.feishu.review_callback_port == 8765
     assert config.session.root_dir == "/tmp/sessions"
     assert config.agent.max_retry == 5
     assert config.agent.watch_paths == ["./runtime/logs"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 """实现反思子代理的硬编码流程。"""
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,7 @@ class ReflectionSubAgent:
         self.session_store = session_store
         self.skill_store = skill_store
         self.llm_client = llm_client
-        self.feishu_tool = feishu_tool or FeishuTool()
+        self.feishu_tool = feishu_tool or FeishuTool(config)
         self.git_tool = git_tool or GitTool()
         self.dedup_engine = dedup_engine or DedupEngine()
         self.diff_analyzer = diff_analyzer or DiffAnalyzer()
@@ -195,8 +196,21 @@ class ReflectionSubAgent:
 
     def _build_skill_name(self, bug_event: BugEvent, review_event: ReviewEvent) -> str:
         base = bug_event.title or bug_event.exception_type or bug_event.bug_id
-        slug = "-".join(part for part in base.lower().replace("/", " ").replace("_", " ").split())[:40].strip("-")
-        return f"skill-{bug_event.project}-{review_event.task_id}-{slug or bug_event.bug_id.lower()}"
+        project_slug = self._safe_slug(bug_event.project, fallback="project", max_length=32)
+        bug_slug = self._safe_slug(review_event.task_id or bug_event.bug_id, fallback="bug", max_length=32)
+        title_slug = self._safe_slug(base, fallback=bug_event.bug_id, max_length=48)
+        return f"skill-{project_slug}-{bug_slug}-{title_slug}"
+
+    def _safe_slug(self, text: str, *, fallback: str, max_length: int) -> str:
+        lowered = str(text or "").lower()
+        slug = re.sub(r"[^a-z0-9._-]+", "-", lowered)
+        slug = re.sub(r"-+", "-", slug).strip(" .-_")
+        if not slug:
+            slug = re.sub(r"[^a-z0-9._-]+", "-", fallback.lower()).strip(" .-_") or "item"
+        reserved = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+        if slug in reserved:
+            slug = f"{slug}-item"
+        return slug[:max_length].rstrip(" .-_") or "item"
 
     def _git_diff(self, base_branch: str, target_branch: str) -> str:
         result = self.git_tool.run({"action": "diff", "args": {}})

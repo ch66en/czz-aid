@@ -15,6 +15,7 @@ from agent.core.tool_registry import ToolRegistry
 from agent.doctor.doctor import Doctor
 from agent.ingestion.pipeline import IngestionPipeline
 from agent.ingestion.log_watcher import LogWatcher
+from agent.ingestion.review_callback_server import ReviewCallbackServer
 from agent.ingestion.sanitizer import Sanitizer
 from agent.ingestion.traceback_parser import TracebackParser
 from agent.llm.openai_compatible_client import OpenAICompatibleClient
@@ -82,13 +83,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(doctor.run())
         return 0
     if args.command == "watch":
+        review_server = None
+        if config.agent.review_required and config.feishu.review_callback_mode == "local":
+            review_server = ReviewCallbackServer(config.feishu.review_callback_host, config.feishu.review_callback_port, reflection)
+            review_server.start()
         watcher = LogWatcher(
             paths=config.agent.watch_paths,
             pipeline=pipeline,
             project=config.project.name,
             package_prefix=getattr(config.project, "package_prefix", None),
         )
-        watcher.watch()
+        try:
+            watcher.watch()
+        finally:
+            if review_server is not None:
+                review_server.stop()
         return 0
     if args.command == "repair":
         raw_log = args.raw_log

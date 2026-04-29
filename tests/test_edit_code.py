@@ -1,4 +1,5 @@
 from agent.tools.edit_code import EditCodeTool
+from agent.config import AppConfig
 
 
 def test_edit_code_applies_hunk_with_different_add_remove_counts(tmp_path):
@@ -84,3 +85,28 @@ def test_edit_code_fails_when_diff_context_does_not_match(tmp_path):
     assert result.success is False
     assert "patch context not found" in result.stderr_summary
     assert path.read_text(encoding="utf-8") == "class Demo { int x = 1; }\n"
+
+
+def test_edit_code_resolves_relative_path_from_project_root(tmp_path):
+    project_root = tmp_path / "project"
+    source = project_root / "src" / "main" / "java" / "Demo.java"
+    source.parent.mkdir(parents=True)
+    source.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(project_root)
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": "src/main/java/Demo.java",
+            "content": "--- a/src/main/java/Demo.java\n"
+            "+++ b/src/main/java/Demo.java\n"
+            "@@\n"
+            "-class Demo { int x = 1; }\n"
+            "+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is True
+    assert result.data["path"] == str(source)
+    assert source.read_text(encoding="utf-8") == "class Demo { int x = 2; }\n"

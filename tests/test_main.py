@@ -54,6 +54,17 @@ def test_watch_starts_log_watcher_with_config(monkeypatch) -> None:
             created["watched"] = True
             return "watching"
 
+    class FakeReviewServer:
+        def __init__(self, host, port, reflection) -> None:
+            created["review_server"] = (host, port, reflection)
+
+        def start(self) -> bool:
+            created["review_started"] = True
+            return True
+
+        def stop(self) -> None:
+            created["review_stopped"] = True
+
     monkeypatch.setattr(main_module, "load_config", lambda _: config)
     monkeypatch.setattr(main_module, "ToolRegistry", lambda: type("R", (), {"get": lambda self, name: None, "register": lambda self, tool: None, "list_tools": lambda self: []})())
     monkeypatch.setattr(main_module, "PermissionGuard", lambda: object())
@@ -66,6 +77,7 @@ def test_watch_starts_log_watcher_with_config(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "Doctor", lambda config: type("D", (), {"run": lambda self: "doctor"})())
     monkeypatch.setattr(main_module, "ReflectionSubAgent", lambda **kwargs: type("R", (), {"reflect": lambda self, bug_id, result: "reflection"})())
     monkeypatch.setattr(main_module, "LogWatcher", FakeWatcher)
+    monkeypatch.setattr(main_module, "ReviewCallbackServer", FakeReviewServer)
 
     exit_code = main(["watch"])
 
@@ -73,3 +85,5 @@ def test_watch_starts_log_watcher_with_config(monkeypatch) -> None:
     assert created["paths"] == ["./runtime/app.log"]
     assert created["project"] == "order-service"
     assert created["watched"] is True
+    assert created["review_started"] is True
+    assert created["review_stopped"] is True

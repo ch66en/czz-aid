@@ -6,12 +6,16 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from agent.config import AppConfig
 from agent.models import ToolResult, ToolSpec
 from agent.tools.base import BaseTool, PermissionType
 
 
 class ReadCodeTool(BaseTool):
     """读取指定源码文件并返回文本内容。"""
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config
 
     @property
     def spec(self) -> ToolSpec:
@@ -38,7 +42,7 @@ class ReadCodeTool(BaseTool):
 
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         data = payload or {}
-        path = Path(str(data.get("path", "")))
+        path = self._resolve_path(str(data.get("path", "")))
         if not path.exists():
             return ToolResult(tool="read_code", success=False, exit_code=1, stderr_summary="code file not found", data={"path": str(path)}, artifacts=[])
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -60,3 +64,10 @@ class ReadCodeTool(BaseTool):
 
     def _content_hash(self, text: str) -> str:
         return f"sha256:{sha256(text.encode('utf-8')).hexdigest()}"
+
+    def _resolve_path(self, raw_path: str) -> Path:
+        path = Path(raw_path).expanduser()
+        if path.is_absolute() or self.config is None:
+            return path
+        project_root = Path(self.config.project.root).expanduser()
+        return project_root / path

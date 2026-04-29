@@ -6,12 +6,16 @@ from pathlib import Path
 import re
 from typing import Any
 
+from agent.config import AppConfig
 from agent.models import ToolResult, ToolSpec
 from agent.tools.base import BaseTool, PermissionType
 
 
 class EditCodeTool(BaseTool):
     """Apply a single-file unified diff to a target file."""
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config
 
     @property
     def spec(self) -> ToolSpec:
@@ -43,7 +47,7 @@ class EditCodeTool(BaseTool):
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """Apply a unified diff to the requested path."""
         data = payload or {}
-        path = Path(str(data.get("path", "")))
+        path = self._resolve_path(str(data.get("path", "")))
         content = str(data.get("content", ""))
 
         if not self._looks_like_unified_diff(content):
@@ -157,3 +161,10 @@ class EditCodeTool(BaseTool):
         if old_block and original_lines[index : index + len(old_block)] != old_block:
             return None
         return index
+
+    def _resolve_path(self, raw_path: str) -> Path:
+        path = Path(raw_path).expanduser()
+        if path.is_absolute() or self.config is None:
+            return path
+        project_root = Path(self.config.project.root).expanduser()
+        return project_root / path

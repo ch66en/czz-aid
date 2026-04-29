@@ -46,6 +46,10 @@ class FeishuConfig(BaseModel):
     app_id: str = ""
     app_secret: str = ""
     approval_chat_id: str = ""
+    review_callback_mode: str = "local"
+    review_callback_host: str = "127.0.0.1"
+    review_callback_port: int = 8765
+    review_callback_base_url: str = "http://127.0.0.1:8765"
 
 
 class SessionConfig(BaseModel):
