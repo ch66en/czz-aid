@@ -1,8 +1,8 @@
 env: dev
-workspace: E:\resourse\code\java\agent_test_1\agent_test_1
+workspace: E:\resourse\code\java\mall-service
 project:
-  name: agent_test_1
-  root: E:\resourse\code\java\agent_test_1\agent_test_1
+  name: mall-service
+  root: E:\resourse\code\java\mall-service
   language: java
   default_branch: master
 llm:
@@ -12,9 +12,9 @@ llm:
   timeout_seconds: 60
 gitee:
   base_url: https://gitee.com/api/v5
-  token: your-gitee-token
-  owner: your-owner
-  repo: your-repo
+  token:
+  owner: ch6enle
+  repo: mall-service
 feishu:
   webhook: ""
   app_id: ""
@@ -29,4 +29,4 @@ agent:
   reflection_enabled: true
   review_required: true
   watch_paths:
-    - ./logs
+    - "E:\\resourse\\code\\java\\mall-service\\logs\\app.log"

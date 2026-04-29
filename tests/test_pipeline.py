@@ -59,3 +59,20 @@ def test_pipeline_creates_bug_event_and_persists_it(tmp_path) -> None:
     assert "frame_contexts" in saved or result.session_snapshot.get("frame_contexts") is not None
     assert result.repair_result is not None
     assert result.repair_result.success is True
+
+
+def test_pipeline_does_not_repair_without_parsed_frames() -> None:
+    session_store = SessionStore()
+    repair_agent = DummyRepairAgent()
+    pipeline = IngestionPipeline(session_store=session_store, repair_agent=repair_agent, sanitizer=Sanitizer())
+
+    result = pipeline.process(
+        raw_text="java.lang.RuntimeException: only header",
+        bug_id="BUG-NO-FRAME",
+        source="log",
+        project="demo",
+    )
+
+    assert result.parsed_traceback.frames == []
+    assert result.repair_result is None
+    assert repair_agent.called is False

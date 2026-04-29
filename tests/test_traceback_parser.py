@@ -39,3 +39,19 @@ def test_traceback_parser_falls_back_to_first_non_framework_frame() -> None:
 
     assert parsed.top_business_frame == "com.acme.order.OrderService(OrderService.java:88)"
     assert parsed.frames[-1].module_name == "com.acme.order.OrderService"
+
+
+def test_traceback_parser_skips_log_prefix_before_exception() -> None:
+    parser = TracebackParser()
+    text = """
+    sort before: [5, 2, 9]
+    complete stack:
+    java.lang.ArrayIndexOutOfBoundsException: Index 7 out of bounds for length 7
+        at org.example.QuickSortWithBugLogFile.partition(QuickSortWithBugLogFile.java:69)
+    """.strip()
+
+    parsed = parser.parse(text, package_prefix="org.example")
+
+    assert parsed.exception_type == "java.lang.ArrayIndexOutOfBoundsException"
+    assert parsed.message == "Index 7 out of bounds for length 7"
+    assert parsed.frames[0].function_name == "partition"

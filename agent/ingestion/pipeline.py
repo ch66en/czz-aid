@@ -78,6 +78,11 @@ class IngestionPipeline:
         bug_event_dict["frame_contexts"] = frame_contexts
         bug_event = BugEvent.model_validate(bug_event_dict)
         duplicate = self.dedup_engine.is_duplicate(bug_event.fingerprint)
+        print(
+            f"[pipeline] bug_id={bug_id} exception={bug_event.exception_type} "
+            f"frames={len(parsed.frames)} duplicate={duplicate}",
+            flush=True,
+        )
         if not duplicate:
             self._save_bug_event(bug_event, frame_contexts)
             self.dedup_engine.mark_seen(bug_event.fingerprint)
@@ -86,8 +91,18 @@ class IngestionPipeline:
             session_snapshot = {**session_snapshot, "frame_contexts": frame_contexts}
             self.session_store.put(bug_id, session_snapshot)
         repair_result = None
-        if self.repair_agent is not None and not duplicate:
+        if self.repair_agent is not None and not duplicate and parsed.frames:
+            print(f"[pipeline] starting repair bug_id={bug_id}", flush=True)
             repair_result = self.repair_agent.repair(bug_id)
+            print(
+                f"[pipeline] repair finished bug_id={bug_id} "
+                f"status={repair_result.status} success={repair_result.success}",
+                flush=True,
+            )
+        elif not parsed.frames:
+            print(f"[pipeline] skip repair bug_id={bug_id} reason=no parsed frames", flush=True)
+        elif duplicate:
+            print(f"[pipeline] skip duplicate bug_id={bug_id}", flush=True)
         return PipelineResult(
             bug_event=bug_event,
             parsed_traceback=parsed,
