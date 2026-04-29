@@ -17,8 +17,8 @@ gitee:
   repo: mall-service
 feishu:
   webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/9f3d6b63-d84d-44c2-8126-3412e1bb6a66"
-  app_id: "cli_a97ac50d0c3b5cdd"
-  app_secret: "EV9nCMW8DtmUr7Qusx4C3gJLmLppBW4I"
+  app_id: 
+  app_secret: 
   approval_chat_id: ""
   # local 模式下，飞书卡片按钮会打开本机 URL，由 watch 进程接收审核事件。
   # 这适合本机/私有网段演示，不需要飞书服务器回传到内网。
