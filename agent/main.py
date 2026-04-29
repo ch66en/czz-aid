@@ -17,6 +17,7 @@ from agent.ingestion.pipeline import IngestionPipeline
 from agent.ingestion.log_watcher import LogWatcher
 from agent.ingestion.sanitizer import Sanitizer
 from agent.ingestion.traceback_parser import TracebackParser
+from agent.llm.openai_compatible_client import OpenAICompatibleClient
 from agent.reflection.reflection_subagent import ReflectionSubAgent
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
@@ -61,6 +62,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     session_store = SessionStore()
     skill_store = SkillStore()
     task_manager = TaskManager(task_store=task_store)
+    llm_client = OpenAICompatibleClient(config=config) if config.llm.api_key.strip() else None
+    if llm_client is not None:
+        llm_client.ping()
     repair_agent = RepairAgent(
         config=config,
         registry=registry,
@@ -68,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         task_manager=task_manager,
         session_store=session_store,
         skill_store=skill_store,
+        llm_client=llm_client,
     )
     pipeline = IngestionPipeline(session_store=session_store, dedup_engine=DedupEngine(), sanitizer=Sanitizer(), traceback_parser=TracebackParser(), repair_agent=repair_agent)
     doctor = Doctor(config=config)

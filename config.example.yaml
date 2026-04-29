@@ -1,20 +1,20 @@
 env: dev
-workspace: E:\Project\agent_test_1
+workspace: E:\resourse\code\java\mall-service
 project:
-  name: agent_test_1
-  root: E:\Project\agent_test_1
+  name: mall-service
+  root: E:\resourse\code\java\mall-service
   language: java
   default_branch: master
 llm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: 
-  model: qwen3.6-plus
+  api_key:
+  model: deepseek-v4-flash
   timeout_seconds: 60
 gitee:
   base_url: https://gitee.com/api/v5
-  token: 
-  owner: Zzzztide
-  repo: agent_test_1
+  token:
+  owner: ch6enle
+  repo: mall-service
 feishu:
   webhook: ""
   app_id: ""
@@ -28,5 +28,5 @@ agent:
   max_retry: 3
   reflection_enabled: true
   review_required: true
-  watch_paths: 
-    - "E:\\Project\\agent_test_1\\quick-sort.log"
+  watch_paths:
+    - "E:\\resourse\\code\\java\\mall-service\\logs\\app.log"

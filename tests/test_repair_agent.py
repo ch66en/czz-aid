@@ -1,5 +1,4 @@
-"""验证修复代理运行时的粗流程约束。"""
-
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,8 +13,6 @@ from agent.storage.skill_store import SkillStore
 
 
 class FakeTool:
-    """模拟工具对象。"""
-
     def __init__(self, name: str, permission: str, result: ToolResult) -> None:
         self._spec = SimpleNamespace(name=name, permission=permission, description=name, input_schema={}, executor="local")
         self._result = result
@@ -33,20 +30,47 @@ class FakeTool:
 
 
 def test_repair_agent_builds_prompt_template() -> None:
-    """提示词应包含硬约束与上下文。"""
     config = AppConfig()
     agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
-    bug_event = BugEvent(bug_id="BUG-1", source="feishu", project="demo", title="t", exception_type="E", message="m", fingerprint="fp")
+    bug_event = BugEvent(bug_id="BUG-1", source="feishu", project="demo", title="t", exception_type="E", message="m", traceback="full stack", fingerprint="fp")
 
-    prompt = agent.build_prompt_template(bug_event, ["skill-a"], {"state": "x"})
+    prompt = agent.build_prompt_template(bug_event, ["skill-a"], {"state": "x", "frame_contexts": [{"filePath": "Demo.java"}]})
+    payload = json.loads(prompt)
 
-    assert "禁止跳过 compile" in prompt
+    assert "compile and test" in prompt
+    assert "project-scoped Java keyword searches" in prompt
     assert "finish_patch" in prompt
     assert "BUG-1" in prompt
+    assert "traceback" not in payload["bug_event"]
+    assert payload["bug_event"]["traceback_omitted"] is True
+    assert payload["frame_contexts"] == [{"filePath": "Demo.java"}]
+    assert "frame_contexts" not in payload["session"]
+
+
+def test_repair_agent_defaults_search_code_root_to_bug_project_root(tmp_path: Path) -> None:
+    config = AppConfig()
+    config.project.name = "mall-service"
+    config.project.root = str(tmp_path)
+    agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+    bug_event = BugEvent(bug_id="BUG-1", source="log", project="mall-service", title="t", exception_type="E", message="m", fingerprint="fp")
+
+    arguments = agent._prepare_tool_arguments("search_code", {"root": ".", "keyword": "ExceptionHandler"}, bug_event)
+
+    assert arguments["root"] == str(tmp_path)
+    assert arguments["keyword"] == "ExceptionHandler"
+
+
+def test_repair_agent_normalizes_list_llm_output_to_single_action() -> None:
+    agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+
+    action = agent._normalize_llm_action([
+        {"tool": "search_code", "arguments": {"keyword": "ExceptionHandler"}, "reason": "find handler"}
+    ])
+
+    assert action == {"tool": "search_code", "arguments": {"keyword": "ExceptionHandler"}, "reason": "find handler"}
 
 
 def test_repair_agent_requires_compile_and_test_after_finish_patch(tmp_path: Path) -> None:
-    """finish_patch 后必须强制执行编译和测试。"""
     source = tmp_path / "QuickSortWithBugLogFile.java"
     source.write_text("class QuickSortWithBugLogFile { void p() { int pivot = arr[right + 1]; } }", encoding="utf-8")
     config = AppConfig()
@@ -72,9 +96,7 @@ def test_repair_agent_requires_compile_and_test_after_finish_patch(tmp_path: Pat
         ).model_dump(),
     )
     session_store.put("BUG-1", {"frame_contexts": [{"filePath": str(source)}]})
-    skill_store = SkillStore()
-    task_store = SimpleNamespace(save=lambda *_: None, get=lambda *_: None)
-    agent = RepairAgent(config, registry, PermissionGuard(), TaskManager(task_store=task_store), session_store, skill_store)
+    agent = RepairAgent(config, registry, PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), session_store, SkillStore())
     agent._create_pr = lambda task, bug_event, history: ToolResult(tool="create_pr", success=True, exit_code=0, stdout_summary="https://gitee.test/pr/1", stderr_summary="", data={"pr_url": "https://gitee.test/pr/1"}, artifacts=[])
 
     result = agent.repair("BUG-1")
@@ -91,7 +113,7 @@ def test_repair_agent_builds_patch_from_current_source_spacing(tmp_path: Path) -
         "class QuickSortWithBugLogFile {\n"
         "    void p() {\n"
         "        int pivot = arr[right+1];\n"
-        "        log(\"选择基准值 pivot = \" + pivot + \"，位置：\" + (right + 1));\n"
+        "        log(\"pivot = \" + pivot + \", position: \" + (right + 1));\n"
         "    }\n"
         "}\n",
         encoding="utf-8",
@@ -102,7 +124,7 @@ def test_repair_agent_builds_patch_from_current_source_spacing(tmp_path: Path) -
 
     assert "-        int pivot = arr[right+1];" in patch
     assert "+        int pivot = arr[right];" in patch
-    assert "位置：\" + right" in patch
+    assert "position: \" + right" in patch
 
 
 def test_repair_agent_parses_gitee_remote_url() -> None:

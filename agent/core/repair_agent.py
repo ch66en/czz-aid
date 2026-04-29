@@ -89,6 +89,32 @@ class RepairAgent:
     def build_prompt_template(self, bug_event: BugEvent, skills: list[str], session: dict[str, Any]) -> str:
         """构造修复代理系统提示词模板。"""
         tool_specs = [tool.spec.model_dump() if hasattr(tool.spec, "model_dump") else dict(vars(tool.spec)) for tool in self.registry.list_tools()]
+        frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
+        prompt_session = dict(session)
+        prompt_session.pop("frame_contexts", None)
+        bug_summary = bug_event.model_dump(exclude={"traceback"})
+        bug_summary["traceback_omitted"] = bool(bug_event.traceback)
+        prompt = {
+            "role": "You are an automated Java repair agent. Output exactly one JSON action each turn.",
+            "rules": [
+                "Use only tools listed in Tools.",
+                "Use bug_event.frames and frame_contexts to locate the failure; full traceback is omitted to avoid repeated stack noise.",
+                "Prefer the top business frame as the first repair target unless evidence points elsewhere.",
+                "Use search_code for project-scoped Java keyword searches; its root is enforced by runtime.",
+                "edit_code content must be a unified diff/patch, not a full file rewrite.",
+                "After a successful edit, finish_patch triggers compile and test; do not skip them.",
+                "Return finish_patch only after a code edit has succeeded.",
+            ],
+            "action_schema": {"tool": "search_code", "arguments": {"keyword": "ExceptionHandler"}, "reason": "why this step is needed"},
+            "finish_schema": {"tool": "finish_patch", "arguments": {}, "reason": "patch is ready for compile/test"},
+            "project": {"name": bug_event.project, "root": self.config.project.root},
+            "bug_event": bug_summary,
+            "frame_contexts": frame_contexts,
+            "skills": skills,
+            "session": prompt_session,
+            "tools": tool_specs,
+        }
+        return json.dumps(prompt, ensure_ascii=False, default=str)
         tool_usage_notes = [
             "1. 只能从 Tools 列表中选择工具名，不允许臆造新工具。",
             "2. 遇到 Java traceback 或测试失败中的 file:line 时，必须优先使用 read_symbol_at(path, line) 或 ast_symbols(path) 定位。",
@@ -221,7 +247,9 @@ class RepairAgent:
                     self._save_session(bug_id, session)
                     continue
 
-                allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), action.get("arguments", {}))
+                arguments = self._prepare_tool_arguments(tool.spec.name, action.get("arguments", {}), bug_event)
+                action["arguments"] = arguments
+                allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), arguments)
                 if not allowed:
                     last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={}, artifacts=[])
                     history.append({"tool": tool.spec.name, "result": last_result.model_dump()})
@@ -230,7 +258,7 @@ class RepairAgent:
                     print(f"[repair] denied tool={tool.spec.name} reason={reason}", flush=True)
                     continue
 
-                result = tool.run(action.get("arguments", {}))
+                result = tool.run(arguments)
                 history.append({"tool": tool.spec.name, "result": result.model_dump()})
                 last_result = result
                 session["last_tool_result"] = result.model_dump()
@@ -253,6 +281,24 @@ class RepairAgent:
         self._send_feishu_help(bug_event, session, last_result)
         print(f"[repair] failed bug_id={bug_id} message=auto repair exhausted", flush=True)
         return RepairRunResult(False, "failed", "auto repair exhausted", task=task, last_result=last_result, prompt_template=prompt_template, history=history)
+
+    def _prepare_tool_arguments(self, tool_name: str, raw_arguments: Any, bug_event: BugEvent) -> dict[str, Any]:
+        """Normalize tool arguments with project-scoped defaults."""
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+        prepared = dict(arguments)
+        if tool_name == "search_code":
+            project_root = self._project_root_for(bug_event)
+            if project_root:
+                prepared["root"] = project_root
+        return prepared
+
+    def _project_root_for(self, bug_event: BugEvent) -> str:
+        """Return the configured root for the current bug event project."""
+        configured_project = str(self.config.project.name)
+        configured_root = str(self.config.project.root)
+        if bug_event.project == configured_project and configured_root:
+            return configured_root
+        return configured_root
 
     def _load_bug_event(self, bug_id: str) -> BugEvent:
         """从会话或默认值中恢复 BugEvent。"""
@@ -308,17 +354,34 @@ class RepairAgent:
             {"role": "system", "content": prompt_template},
             {"role": "user", "content": json.dumps(history, ensure_ascii=False)},
         ]
-        print("=== LLM SEND START ===")
-        print(json.dumps(messages, ensure_ascii=False, indent=2))
-        print("=== LLM SEND END ===")
         response = self.llm_client.chat(messages)
+        artifact_path = response.data.get("artifact_path") if isinstance(response.data, dict) else ""
+        if artifact_path:
+            print(f"[repair] llm_call saved={artifact_path}", flush=True)
         payload = response.data.get("content") if isinstance(response.data, dict) else None
         if isinstance(payload, str):
             try:
-                return json.loads(payload)
+                return self._normalize_llm_action(json.loads(payload))
             except json.JSONDecodeError:
                 return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm output"}
         return {"tool": "finish_patch", "arguments": {}, "reason": "no llm output"}
+
+    def _normalize_llm_action(self, payload: Any) -> dict[str, Any]:
+        """Convert model output into exactly one executable action."""
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, list):
+            candidates = [
+                item
+                for item in payload
+                if isinstance(item, dict)
+                and isinstance(item.get("tool"), str)
+                and "arguments" in item
+                and "result" not in item
+            ]
+            if candidates:
+                return candidates[-1]
+        return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm action shape"}
 
     def _pick_patch_target(self, bug_event: BugEvent, session: dict[str, Any]) -> str:
         """从上下文中选择真实源码文件作为补丁目标。"""
