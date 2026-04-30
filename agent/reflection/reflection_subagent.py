@@ -103,8 +103,8 @@ class ReflectionSubAgent:
             return ReflectionResult(False, "human_fix_branch is required for review_failed")
         session = self._load_session(review_event.task_id)
         bug_event = self._load_bug_event(review_event.task_id, session)
-        base_branch = str(session.get("base_branch") or getattr(self.config.project, "base_branch", None) or self.config.project.default_branch)
-        agent_branch = str(session.get("agent_branch", "")).strip()
+        base_branch = self._resolve_base_branch(session)
+        agent_branch = self._resolve_agent_branch(session)
         if not agent_branch:
             return ReflectionResult(False, "agent_branch is missing in session")
         agent_diff = self._git_diff(base_branch, agent_branch)
@@ -195,11 +195,58 @@ class ReflectionSubAgent:
             "compile_result": self._load_artifact_json(session, "compile_result.json") or session.get("compile_result", {}),
             "test_result": self._load_artifact_json(session, "test_result.json") or session.get("test_result", {}),
             "create_pr_result": session.get("create_pr_result", {}),
-            "agent_branch": session.get("agent_branch", ""),
-            "base_branch": session.get("base_branch", ""),
+            "agent_branch": self._resolve_agent_branch(session),
+            "base_branch": self._resolve_base_branch(session),
             "pr_url": session.get("pr_url", ""),
             "extra": extra or {},
         }
+
+    def _resolve_agent_branch(self, session: dict[str, Any]) -> str:
+        direct = str(session.get("agent_branch", "")).strip()
+        if direct:
+            return direct
+
+        create_pr_result = session.get("create_pr_result")
+        if isinstance(create_pr_result, dict):
+            data = create_pr_result.get("data")
+            if isinstance(data, dict):
+                for key in ("branch", "agent_branch"):
+                    value = str(data.get(key, "")).strip()
+                    if value:
+                        return value
+
+        review_payload = session.get("feishu_review_payload")
+        if isinstance(review_payload, dict):
+            args = review_payload.get("args")
+            if isinstance(args, dict):
+                value = str(args.get("agent_branch", "")).strip()
+                if value:
+                    return value
+
+        return ""
+
+    def _resolve_base_branch(self, session: dict[str, Any]) -> str:
+        direct = str(session.get("base_branch", "")).strip()
+        if direct:
+            return direct
+
+        create_pr_result = session.get("create_pr_result")
+        if isinstance(create_pr_result, dict):
+            data = create_pr_result.get("data")
+            if isinstance(data, dict):
+                value = str(data.get("base_branch", "")).strip()
+                if value:
+                    return value
+
+        review_payload = session.get("feishu_review_payload")
+        if isinstance(review_payload, dict):
+            args = review_payload.get("args")
+            if isinstance(args, dict):
+                value = str(args.get("base_branch", "")).strip()
+                if value:
+                    return value
+
+        return str(getattr(self.config.project, "base_branch", None) or self.config.project.default_branch)
 
     def _tool_history_from_session(self, session: dict[str, Any]) -> str:
         calls = session.get("tool_calls")

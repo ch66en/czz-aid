@@ -221,7 +221,10 @@ def test_repair_agent_requires_compile_and_test_after_finish_patch(tmp_path: Pat
     assert result.last_result is not None
     assert result.last_result.tool == "run_test"
     assert session_store.get("pr:") is None
-    assert session_store.get("BUG-1")["feishu_review_result"]["success"] is True
+    session = session_store.get("BUG-1")
+    assert session["agent_branch"] == "agent-fix/bug-1"
+    assert session["base_branch"] == "main"
+    assert session["feishu_review_result"]["success"] is True
 
 
 def test_repair_agent_builds_patch_from_current_source_spacing(tmp_path: Path) -> None:

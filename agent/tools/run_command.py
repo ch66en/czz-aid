@@ -44,5 +44,5 @@ class RunCommandTool(BaseTool):
         data = payload or {}
         command = str(data.get("command", ""))
         cwd = Path(self.config.project.root) if self.config.project.root else None
-        completed = subprocess.run(command, capture_output=True, text=True, shell=True, check=False, cwd=str(cwd) if cwd is not None else None)
+        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", shell=True, check=False, cwd=str(cwd) if cwd is not None else None)
         return ToolResult(tool="run_command", success=completed.returncode == 0, exit_code=completed.returncode, stdout_summary=(completed.stdout or "").strip(), stderr_summary=(completed.stderr or "").strip(), data={"command": command}, artifacts=[])

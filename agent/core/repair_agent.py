@@ -275,8 +275,18 @@ class RepairAgent:
                         print(f"[repair] create_pr failed bug_id={bug_id} error={pr_result.stderr_summary}", flush=True)
                         return RepairRunResult(False, "failed", "create pr failed", task=task, last_result=pr_result, prompt_template=prompt_template, history=history)
                     pr_url = str(pr_result.data.get("pr_url") or pr_result.stdout_summary)
+                    agent_branch = str(pr_result.data.get("branch") or task.agent_branch or self._repair_branch_name(bug_event.bug_id))
+                    base_branch = str(pr_result.data.get("base_branch") or task.base_branch or self.config.project.default_branch)
                     task.pr_url = pr_url
-                    session = {**session, "pr_url": pr_url, "status": "passed"}
+                    task.agent_branch = agent_branch
+                    task.base_branch = base_branch
+                    session = {
+                        **session,
+                        "agent_branch": agent_branch,
+                        "base_branch": base_branch,
+                        "pr_url": pr_url,
+                        "status": "passed",
+                    }
                     review_result = self._send_feishu_review_request(task, bug_event, session, pr_result, compile_result, test_result)
                     if self.config.agent.review_required:
                         task.status = TaskStatus.REVIEWING
@@ -747,7 +757,7 @@ class RepairAgent:
         )
 
     def _run_git(self, cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, shell=False, check=False)
+        return subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, check=False)
 
     def _edited_paths_from_history(self, history: list[dict[str, Any]], project_root: Path) -> list[Path]:
         paths: list[Path] = []

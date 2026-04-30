@@ -109,7 +109,7 @@ class GitTool(BaseTool):
             command.append("--")
             command.extend(str(path) for path in paths)
 
-        completed = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, shell=False, check=False)
+        completed = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, check=False)
         output = completed.stdout or ""
         return ToolResult(
             tool="git_tool",

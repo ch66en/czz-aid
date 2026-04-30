@@ -134,4 +134,7 @@ class ReviewCallbackServer:
         handler.send_header("Content-Type", "text/html; charset=utf-8")
         handler.send_header("Content-Length", str(len(html)))
         handler.end_headers()
-        handler.wfile.write(html)
+        try:
+            handler.wfile.write(html)
+        except OSError as exc:
+            print(f"[review-callback] client disconnected while sending response error={exc}", flush=True)

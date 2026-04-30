@@ -133,3 +133,30 @@ def test_reflection_review_failed_compares_agent_and_human_diff(tmp_path) -> Non
     assert session["diff_analysis"]["agent_only_files"] == ["src/Agent.java"]
     assert session["diff_analysis"]["human_only_files"] == ["src/Human.java"]
     assert "## 人工修复关键点" in result.skill_artifact.markdown
+
+
+def test_reflection_review_failed_recovers_agent_branch_from_pr_result(tmp_path) -> None:
+    session_store = SessionStore()
+    skill_store = SkillStore()
+    bug_id = "bug-4"
+    session_store.put(
+        bug_id,
+        {
+            "artifact_paths": {},
+            "create_pr_result": {
+                "data": {
+                    "branch": "agent-fix/demo",
+                    "base_branch": "main",
+                    "pr_url": "https://gitee.test/pr/1",
+                }
+            },
+        },
+    )
+    session_store.put(f"bug_event:{bug_id}", {"bug_id": bug_id, "source": "feishu", "project": "demo", "title": "NPE", "exception_type": "NullPointerException", "message": "x", "traceback": "", "fingerprint": "fp"})
+    git_tool = FakeGitTool()
+    agent = ReflectionSubAgent(config=AppConfig(workspace=str(tmp_path)), session_store=session_store, skill_store=skill_store, llm_client=FakeLLM(), git_tool=git_tool)
+
+    result = agent.handle_review_event({"event_type": "review_failed", "bug_id": bug_id, "reviewer": "dev", "human_fix_branch": "human-fix/1", "comment": "bad"})
+
+    assert result.success is True
+    assert git_tool.payloads[0]["args"] == {"base": "main", "target": "agent-fix/demo"}
