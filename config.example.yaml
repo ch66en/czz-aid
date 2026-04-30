@@ -1,25 +1,25 @@
 env: dev
-workspace: E:\Project\mall-service
+workspace: E:\resourse\code\java\mall-service
 project:
   name: mall-service
-  root: E:\Project\mall-service
+  root: E:\resourse\code\java\mall-service
   language: java
   default_branch: master
 llm:
   base_url: https://token-plan-cn.xiaomimimo.com/v1
-  api_key: 
+  api_key:
   model: mimo-v2.5-pro
   timeout_seconds: 60
 gitee:
   base_url: https://gitee.com/api/v5
-  token: 
+  token:
   owner: ch6enle
   repo: mall-service
 feishu:
   webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/9f3d6b63-d84d-44c2-8126-3412e1bb6a66"
-  app_id: 
-  app_secret: 
-  approval_chat_id: ""
+  app_id: "cli_a97ac50d0c3b5cdd"
+  app_secret: ""
+  approval_chat_id: "6666"
   # local 模式下，飞书卡片按钮会打开本机 URL，由 watch 进程接收审核事件。
   # 这适合本机/私有网段演示，不需要飞书服务器回传到内网。
   review_callback_mode: local
@@ -35,4 +35,4 @@ agent:
   reflection_enabled: true
   review_required: true
   watch_paths:
-    - "E:\\Project\\mall-service\\logs\\app.log"
+    - "E:\\resourse\\code\\java\\mall-service\\logs\\app.log"

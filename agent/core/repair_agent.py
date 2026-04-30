@@ -370,11 +370,37 @@ class RepairAgent:
             print(f"[repair] llm_call saved={artifact_path}", flush=True)
         payload = response.data.get("content") if isinstance(response.data, dict) else None
         if isinstance(payload, str):
-            try:
-                return self._normalize_llm_action(json.loads(payload))
-            except json.JSONDecodeError:
+            parsed_payload = self._parse_llm_action_payload(payload)
+            if parsed_payload is None:
                 return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm output"}
+            return self._normalize_llm_action(parsed_payload)
         return {"tool": "finish_patch", "arguments": {}, "reason": "no llm output"}
+
+    def _parse_llm_action_payload(self, payload: str) -> Any | None:
+        """Parse a model response that may wrap the JSON action in prose or fences."""
+        text = payload.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+        for block in fenced_blocks:
+            try:
+                return json.loads(block.strip())
+            except json.JSONDecodeError:
+                continue
+
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"[\{\[]", text):
+            try:
+                parsed, _ = decoder.raw_decode(text[match.start() :])
+                return parsed
+            except json.JSONDecodeError:
+                continue
+        return None
 
     def _normalize_llm_action(self, payload: Any) -> dict[str, Any]:
         """Convert model output into exactly one executable action."""
@@ -535,7 +561,7 @@ class RepairAgent:
             ["git", "checkout", "-B", branch],
             ["git", "add", *[str(path.relative_to(project_root)) for path in edited_paths]],
             ["git", "commit", "-m", f"fix: auto repair {bug_event.bug_id}"],
-            ["git", "push", "-u", "origin", branch],
+            ["git", "push", "--force", "-u", "origin", branch],
         ]
         command_output: list[str] = []
         for command in commands:

@@ -88,6 +88,30 @@ def test_repair_agent_normalizes_list_llm_output_to_single_action() -> None:
     assert action == {"tool": "search_code", "arguments": {"keyword": "ExceptionHandler"}, "reason": "find handler"}
 
 
+def test_repair_agent_extracts_json_action_from_markdown_response() -> None:
+    agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+
+    payload = (
+        "I need to examine the MallUser class.\n\n"
+        "```json\n"
+        "{\n"
+        '  "tool": "read_code",\n'
+        '  "arguments": {"path": "MallUser.java"},\n'
+        '  "reason": "Examine getProfileJson"\n'
+        "}\n"
+        "```"
+    )
+
+    parsed = agent._parse_llm_action_payload(payload)
+    action = agent._normalize_llm_action(parsed)
+
+    assert action == {
+        "tool": "read_code",
+        "arguments": {"path": "MallUser.java"},
+        "reason": "Examine getProfileJson",
+    }
+
+
 def test_repair_agent_requires_compile_and_test_after_finish_patch(tmp_path: Path) -> None:
     source = tmp_path / "QuickSortWithBugLogFile.java"
     source.write_text("class QuickSortWithBugLogFile { void p() { int pivot = arr[right + 1]; } }", encoding="utf-8")
@@ -169,6 +193,40 @@ def test_repair_agent_create_pr_requires_real_token(tmp_path: Path) -> None:
 
     assert result.success is False
     assert result.stderr_summary == "missing gitee token"
+
+
+def test_repair_agent_create_pr_force_pushes_branch(tmp_path: Path) -> None:
+    source = tmp_path / "Demo.java"
+    source.write_text("class Demo {}\n", encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(tmp_path)
+    config.gitee.owner = "ch6enle"
+    config.gitee.repo = "agent_test_1"
+    config.gitee.token = "real-token"
+    agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+    commands: list[list[str]] = []
+
+    def fake_run_git(cwd: Path, command: list[str]) -> SimpleNamespace:
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    agent._run_git = fake_run_git
+    agent._create_gitee_pull_request = lambda owner, repo, branch, base_branch, bug_event: ToolResult(
+        tool="create_pr",
+        success=True,
+        exit_code=0,
+        stdout_summary="https://gitee.test/pr/1",
+        stderr_summary="",
+        data={"pr_url": "https://gitee.test/pr/1"},
+        artifacts=[],
+    )
+    history = [{"tool": "edit_code", "result": {"success": True, "artifacts": [str(source)], "data": {"path": str(source)}}}]
+    bug_event = BugEvent(bug_id="BUG-PR", source="log", project="demo", title="", exception_type="E", message="", fingerprint="fp")
+
+    result = agent._create_pr(SimpleNamespace(id="task-1", bug_id="BUG-PR"), bug_event, history)
+
+    assert result.success is True
+    assert commands[-1] == ["git", "push", "--force", "-u", "origin", "agent-fix/bug-pr"]
 
 
 def test_repair_agent_sends_feishu_help_on_failure() -> None:
