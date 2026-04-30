@@ -19,14 +19,15 @@ class ReadSymbolAtTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="read_symbol_at",
-            description="Read the symbol at a given file line",
+            description="Read the smallest Java symbol enclosing a given source line.",
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "line": {"type": "integer"},
+                    "path": {"type": "string", "description": "Absolute or project-relative path to a Java source file."},
+                    "line": {"type": "integer", "description": "1-based source line number."},
                 },
                 "required": ["path", "line"],
+                "additionalProperties": False,
             },
             permission=PermissionType.READ_ONLY.value,
             executor="local",

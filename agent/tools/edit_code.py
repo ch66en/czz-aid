@@ -34,6 +34,7 @@ class EditCodeTool(BaseTool):
                     "content": {"type": "string", "description": "Unified diff text for exactly one file; raw replacement text is not accepted."},
                 },
                 "required": ["path", "content"],
+                "additionalProperties": False,
             },
             permission=PermissionType.WORKSPACE_WRITE.value,
             executor="local",

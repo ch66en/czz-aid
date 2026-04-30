@@ -52,7 +52,7 @@ class ReflectionSubAgent:
         self.skill_store = skill_store
         self.llm_client = llm_client
         self.feishu_tool = feishu_tool or FeishuTool(config)
-        self.git_tool = git_tool or GitTool()
+        self.git_tool = git_tool or GitTool(config)
         self.dedup_engine = dedup_engine or DedupEngine()
         self.diff_analyzer = diff_analyzer or DiffAnalyzer()
         self.skill_generator = skill_generator or SkillGenerator()
@@ -77,20 +77,23 @@ class ReflectionSubAgent:
     def _handle_review_passed(self, review_event: ReviewEvent) -> ReflectionResult:
         session = self._load_session(review_event.task_id)
         bug_event = self._load_bug_event(review_event.task_id, session)
+        context = self._reflection_context(mode="review_passed", bug_event=bug_event, review_event=review_event, session=session)
         prompt = self._build_summary_prompt(
-            mode="review_passed",
-            bug_event=bug_event,
-            review_event=review_event,
-            trace_full=self._load_artifact_text(session, "trace_full_sanitized.log"),
-            trace_frames=self._load_artifact_json(session, "trace_frames.json"),
-            tool_calls=self._load_artifact_text(session, "tool_calls.jsonl"),
-            agent_patch=self._load_artifact_text(session, "agent_patch.diff"),
-            compile_result=self._load_artifact_json(session, "compile_result.json"),
-            test_result=self._load_artifact_json(session, "test_result.json"),
+            context=context,
         )
         summary = self._ask_llm(prompt)
         skill_artifact = self._generate_and_persist_skill(bug_event=bug_event, review_event=review_event, title=bug_event.title or bug_event.exception_type, body=summary)
-        self._update_session(review_event.task_id, {"reflection": "review_passed", "skill": skill_artifact.meta.model_dump()})
+        self._update_session(
+            review_event.task_id,
+            {
+                "reflection": "review_passed",
+                "review_event": review_event.model_dump(mode="json"),
+                "reflection_context": context,
+                "reflection_summary": summary,
+                "skill": skill_artifact.meta.model_dump(mode="json"),
+                "skill_path": str(skill_artifact.skill_dir),
+            },
+        )
         self._notify_skill_created(skill_artifact, review_event.task_id)
         return ReflectionResult(True, "skill created from review_passed", skill_artifact=skill_artifact)
 
@@ -107,21 +110,40 @@ class ReflectionSubAgent:
         agent_diff = self._git_diff(base_branch, agent_branch)
         human_diff = self._git_diff(base_branch, human_fix_branch)
         diff_summary = self.diff_analyzer.analyze(agent_diff, human_diff)
-        prompt = self._build_summary_prompt(
+        context = self._reflection_context(
             mode="review_failed",
             bug_event=bug_event,
             review_event=review_event,
-            trace_full=self._load_artifact_text(session, "trace_full_sanitized.log"),
-            trace_frames=self._load_artifact_json(session, "trace_frames.json"),
-            tool_calls=self._load_artifact_text(session, "tool_calls.jsonl"),
-            agent_patch=agent_diff,
-            compile_result=self._load_artifact_json(session, "compile_result.json"),
-            test_result=self._load_artifact_json(session, "test_result.json"),
-            extra={"human_fix_branch": human_fix_branch, "human_diff": human_diff, "diff_summary": diff_summary.summary},
+            session=session,
+            extra={
+                "base_branch": base_branch,
+                "agent_branch": agent_branch,
+                "human_fix_branch": human_fix_branch,
+                "agent_diff": agent_diff,
+                "human_diff": human_diff,
+                "diff_analysis": diff_summary.to_dict(),
+            },
+        )
+        prompt = self._build_summary_prompt(
+            context=context,
         )
         summary = self._ask_llm(prompt)
         skill_artifact = self._generate_and_persist_skill(bug_event=bug_event, review_event=review_event, title=bug_event.title or bug_event.exception_type, body=summary)
-        self._update_session(review_event.task_id, {"reflection": "review_failed", "skill": skill_artifact.meta.model_dump(), "human_fix_branch": human_fix_branch, "agent_diff": agent_diff, "human_diff": human_diff})
+        self._update_session(
+            review_event.task_id,
+            {
+                "reflection": "review_failed",
+                "review_event": review_event.model_dump(mode="json"),
+                "reflection_context": context,
+                "reflection_summary": summary,
+                "skill": skill_artifact.meta.model_dump(mode="json"),
+                "skill_path": str(skill_artifact.skill_dir),
+                "human_fix_branch": human_fix_branch,
+                "agent_diff": agent_diff,
+                "human_diff": human_diff,
+                "diff_analysis": diff_summary.to_dict(),
+            },
+        )
         self._notify_skill_created(skill_artifact, review_event.task_id)
         return ReflectionResult(True, "skill created from review_failed", skill_artifact=skill_artifact)
 
@@ -142,12 +164,17 @@ class ReflectionSubAgent:
         value = session.get(name)
         if isinstance(value, str):
             return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, default=str)
         path = session.get("artifact_paths", {}).get(name) if isinstance(session.get("artifact_paths"), dict) else None
         if isinstance(path, str) and Path(path).exists():
             return Path(path).read_text(encoding="utf-8")
         return ""
 
     def _load_artifact_json(self, session: dict[str, Any], name: str) -> Any:
+        value = session.get(name)
+        if isinstance(value, (dict, list)):
+            return value
         text = self._load_artifact_text(session, name)
         if not text:
             return {}
@@ -156,34 +183,71 @@ class ReflectionSubAgent:
         except json.JSONDecodeError:
             return text
 
-    def _build_summary_prompt(self, *, mode: str, bug_event: BugEvent, review_event: ReviewEvent, trace_full: str, trace_frames: Any, tool_calls: str, agent_patch: str, compile_result: Any, test_result: Any, extra: dict[str, Any] | None = None) -> str:
-        payload = {
+    def _reflection_context(self, *, mode: str, bug_event: BugEvent, review_event: ReviewEvent, session: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
             "mode": mode,
-            "bug_event": bug_event.model_dump(),
-            "review_event": review_event.model_dump(),
-            "trace_full": trace_full,
-            "trace_frames": trace_frames,
-            "tool_calls": tool_calls,
-            "agent_patch": agent_patch,
-            "compile_result": compile_result,
-            "test_result": test_result,
+            "bug_event": bug_event.model_dump(mode="json"),
+            "review_event": review_event.model_dump(mode="json"),
+            "trace_full": self._load_artifact_text(session, "trace_full_sanitized.log") or bug_event.traceback,
+            "trace_frames": self._load_artifact_json(session, "trace_frames.json") or [frame.model_dump(mode="json") for frame in bug_event.frames],
+            "tool_calls": self._load_artifact_text(session, "tool_calls.jsonl") or self._tool_history_from_session(session),
+            "agent_patch": self._load_artifact_text(session, "agent_patch.diff"),
+            "compile_result": self._load_artifact_json(session, "compile_result.json") or session.get("compile_result", {}),
+            "test_result": self._load_artifact_json(session, "test_result.json") or session.get("test_result", {}),
+            "create_pr_result": session.get("create_pr_result", {}),
+            "agent_branch": session.get("agent_branch", ""),
+            "base_branch": session.get("base_branch", ""),
+            "pr_url": session.get("pr_url", ""),
             "extra": extra or {},
         }
+
+    def _tool_history_from_session(self, session: dict[str, Any]) -> str:
+        calls = session.get("tool_calls")
+        if isinstance(calls, list) and calls:
+            return "\n".join(json.dumps({"type": "tool_call", **item}, ensure_ascii=False, default=str) for item in calls if isinstance(item, dict))
+        items = []
+        for key in ["last_tool_result", "compile_result", "test_result", "create_pr_result"]:
+            value = session.get(key)
+            if value:
+                items.append({"name": key, "result": value})
+        return "\n".join(json.dumps(item, ensure_ascii=False, default=str) for item in items)
+
+    def _build_summary_prompt(self, *, context: dict[str, Any]) -> str:
         return (
             "你是一个只负责总结的反思模型，不负责选择工具。\n"
-            "请基于输入内容输出结构化总结，覆盖适用场景、典型信号、有用步骤、多余步骤、推荐步骤、避免事项。\n"
-            "如果是 review_failed，请重点比较 Agent 修复与人工修复的差异。\n"
-            f"INPUT: {json.dumps(payload, ensure_ascii=False, default=str)}"
+            "请只输出 JSON 对象，字段包括：applicable_scenario, typical_signals, root_cause, useful_steps, "
+            "useless_steps, missing_steps, agent_mistakes, human_fix_key_points, recommended_steps, avoid_patterns, validation_steps。\n"
+            "review_passed 时总结 Agent 做对的路径；review_failed 时重点比较 agent_diff 与 human_diff，指出 Agent 修错层、漏掉上下文或漏测试的原因。\n"
+            f"INPUT: {json.dumps(context, ensure_ascii=False, default=str)}"
         )
 
     def _ask_llm(self, prompt: str) -> str:
         if self.llm_client is None:
-            return "适用场景：通用。典型信号：异常栈。推荐步骤：先定位业务帧，再编译测试。避免事项：跳过验证。"
+            return self._fallback_summary()
         response = self.llm_client.chat([{"role": "system", "content": prompt}])
         data = getattr(response, "data", {})
         if isinstance(data, dict):
-            return str(data.get("content", ""))
-        return str(getattr(response, "stdout_summary", ""))
+            content = str(data.get("content", ""))
+            return content or self._fallback_summary()
+        return str(getattr(response, "stdout_summary", "")) or self._fallback_summary()
+
+    def _fallback_summary(self) -> str:
+        return json.dumps(
+            {
+                "applicable_scenario": "Java 服务异常栈触发的自动修复复盘。",
+                "typical_signals": ["日志中出现 Java exception", "存在可定位的业务栈帧"],
+                "root_cause": "根据 top business frame 和验证结果确认根因。",
+                "useful_steps": ["优先读取 top business frame", "生成最小补丁", "执行 compile/test"],
+                "useless_steps": [],
+                "missing_steps": [],
+                "agent_mistakes": [],
+                "human_fix_key_points": [],
+                "recommended_steps": ["解析异常栈", "定位业务帧", "读取相关源码", "生成最小补丁", "运行编译和测试", "创建 PR 后人工 review"],
+                "avoid_patterns": ["不要跳过测试", "不要修改无关文件", "不要用宽泛 catch 掩盖根因"],
+                "validation_steps": ["mvn compile", "mvn test"],
+            },
+            ensure_ascii=False,
+        )
 
     def _generate_and_persist_skill(self, *, bug_event: BugEvent, review_event: ReviewEvent, title: str, body: str) -> SkillArtifact:
         skill_name = self._build_skill_name(bug_event, review_event)
@@ -213,10 +277,10 @@ class ReflectionSubAgent:
         return slug[:max_length].rstrip(" .-_") or "item"
 
     def _git_diff(self, base_branch: str, target_branch: str) -> str:
-        result = self.git_tool.run({"action": "diff", "args": {}})
+        result = self.git_tool.run({"action": "diff", "args": {"base": base_branch, "target": target_branch}})
         if result.success and result.stdout_summary:
             return result.stdout_summary
-        return f"diff({base_branch}...{target_branch}) unavailable"
+        return f"diff({base_branch}...{target_branch}) unavailable: {result.stderr_summary}"
 
     def _notify_skill_created(self, artifact: SkillArtifact, bug_id: str) -> None:
         self.feishu_tool.run({"action": "send_skill_created_card", "args": {"bug_id": bug_id, "skill_name": artifact.meta.name, "skill_path": str(artifact.skill_dir)}})

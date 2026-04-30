@@ -3,6 +3,8 @@ from __future__ import annotations
 """提供 Git 操作工具。"""
 
 import re
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from agent.config import AppConfig
@@ -21,7 +23,15 @@ class GitTool(BaseTool):
         return ToolSpec(
             name="git_tool",
             description="Git helper for branch/commit/push/status/diff",
-            input_schema={"type": "object", "properties": {"action": {"type": "string"}, "args": {"type": "object"}}},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create_branch", "commit", "diff"], "description": "Git operation to run."},
+                    "args": {"type": "object", "description": "Operation-specific arguments."},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
             permission=PermissionType.VCS_WRITE.value,
             executor="local",
         )
@@ -59,6 +69,9 @@ class GitTool(BaseTool):
                 return ToolResult(tool="git_tool", success=False, exit_code=1, stdout_summary="", stderr_summary="message is required", data={"action": action}, artifacts=[])
             return ToolResult(tool="git_tool", success=True, exit_code=0, stdout_summary="commit prepared", stderr_summary="", data={"action": action, "command": f'git commit -m "{message}"'}, artifacts=[])
 
+        if action == "diff":
+            return self._run_diff(args)
+
         return ToolResult(
             tool="git_tool",
             success=True,
@@ -78,3 +91,53 @@ class GitTool(BaseTool):
     def _slug(self, text: str) -> str:
         cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower())
         return re.sub(r"-+", "-", cleaned).strip("-")
+
+    def _run_diff(self, args: dict[str, Any]) -> ToolResult:
+        base = str(args.get("base", "")).strip()
+        target = str(args.get("target", "")).strip()
+        cwd = self._project_root()
+        if cwd is None:
+            return ToolResult(tool="git_tool", success=False, exit_code=1, stdout_summary="", stderr_summary="project root not found", data={"action": "diff", "base": base, "target": target}, artifacts=[])
+
+        command = ["git", "diff", "--no-ext-diff", "--no-color"]
+        if base and target:
+            command.append(f"{base}...{target}")
+        elif target:
+            command.append(target)
+        paths = args.get("paths", [])
+        if isinstance(paths, list) and paths:
+            command.append("--")
+            command.extend(str(path) for path in paths)
+
+        completed = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, shell=False, check=False)
+        output = completed.stdout or ""
+        return ToolResult(
+            tool="git_tool",
+            success=completed.returncode == 0,
+            exit_code=completed.returncode,
+            stdout_summary=output,
+            stderr_summary=(completed.stderr or "").strip(),
+            data={"action": "diff", "base": base, "target": target, "command": command, "cwd": str(cwd), "changed_files": self._changed_files(output)},
+            artifacts=[],
+        )
+
+    def _project_root(self) -> Path | None:
+        root = Path(self.config.project.root)
+        if root.exists():
+            return root
+        return None
+
+    def _changed_files(self, diff_text: str) -> list[str]:
+        files: list[str] = []
+        for line in diff_text.splitlines():
+            if not line.startswith("diff --git "):
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            path = parts[3]
+            if path.startswith("b/"):
+                path = path[2:]
+            if path not in files:
+                files.append(path)
+        return files

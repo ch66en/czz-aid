@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.models import ToolResult, ToolSpec
-from agent.tools.base import BaseTool
+from agent.tools.base import BaseTool, PermissionType
 
 
 class ReadLogTool(BaseTool):
@@ -15,7 +15,22 @@ class ReadLogTool(BaseTool):
     @property
     def spec(self) -> ToolSpec:
         """返回日志读取工具的规格说明。"""
-        return ToolSpec(name="read_log", description="Read a log file")
+        return ToolSpec(
+            name="read_log",
+            description="Read a log file from disk.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path to the log file."}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            permission=PermissionType.READ_ONLY.value,
+            executor="local",
+        )
+
+    @property
+    def permission(self) -> PermissionType:
+        return PermissionType.READ_ONLY
 
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """根据路径参数读取日志文件。"""

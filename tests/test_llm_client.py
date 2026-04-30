@@ -65,6 +65,34 @@ def test_llm_client_returns_failure_on_request_error() -> None:
     assert "request timed out" in result.stderr_summary
 
 
+def test_llm_client_forwards_json_response_format() -> None:
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))], usage=None)
+    config = AppConfig(llm={"api_key": "test", "base_url": "https://api.openai.com/v1"})
+    client = OpenAICompatibleClient(config=config, client=FakeClient(response))
+
+    client.chat([{"role": "user", "content": "return json"}], response_format={"type": "json_object"})
+
+    assert client.client.chat.completions.last_kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_llm_client_extracts_native_tool_calls() -> None:
+    tool_call = SimpleNamespace(
+        id="call-1",
+        type="function",
+        function=SimpleNamespace(name="read_code", arguments='{"path":"Demo.java"}'),
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[tool_call]))], usage=None)
+    config = AppConfig(llm={"api_key": "test", "base_url": "https://api.openai.com/v1"})
+    client = OpenAICompatibleClient(config=config, client=FakeClient(response))
+
+    result = client.chat([{"role": "user", "content": "read"}], tools=[{"type": "function", "function": {"name": "read_code", "parameters": {"type": "object", "properties": {}}}}])
+
+    assert result.success is True
+    assert result.data["tool_calls"][0]["id"] == "call-1"
+    assert result.data["tool_calls"][0]["function"]["name"] == "read_code"
+    assert result.data["tool_calls"][0]["function"]["arguments"] == '{"path":"Demo.java"}'
+
+
 def test_llm_client_records_debug_details_with_sanitization() -> None:
     """debug 模式应记录脱敏后的输入输出与耗时。"""
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="token=abc123"))], usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3, model_dump=lambda: {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}))

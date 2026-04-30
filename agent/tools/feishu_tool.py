@@ -24,7 +24,19 @@ class FeishuTool(BaseTool):
         return ToolSpec(
             name="feishu_tool",
             description="Send feishu help/review card",
-            input_schema={"type": "object", "properties": {"action": {"type": "string"}, "args": {"type": "object"}}},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["send_help_card", "send_review_request_card", "send_skill_created_card"],
+                        "description": "Feishu notification action.",
+                    },
+                    "args": {"type": "object", "description": "Notification payload."},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
             permission=PermissionType.EXTERNAL_NOTIFY.value,
             executor="local",
         )

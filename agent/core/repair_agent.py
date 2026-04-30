@@ -18,7 +18,7 @@ from agent.core.task_manager import TaskManager
 from agent.core.tool_registry import ToolRegistry
 from agent.ingestion.sanitizer import Sanitizer
 from agent.llm.openai_compatible_client import OpenAICompatibleClient
-from agent.models import BugEvent, RepairTask, TaskStatus, ToolResult
+from agent.models import BugEvent, RepairTask, TaskStatus, ToolResult, ToolSpec
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.tools.base import ToolContext
@@ -89,16 +89,16 @@ class RepairAgent:
 
     def build_prompt_template(self, bug_event: BugEvent, skills: list[str], session: dict[str, Any]) -> str:
         """构造修复代理系统提示词模板。"""
-        tool_specs = [tool.spec.model_dump() if hasattr(tool.spec, "model_dump") else dict(vars(tool.spec)) for tool in self.registry.list_tools()]
         frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
         prompt_session = dict(session)
         prompt_session.pop("frame_contexts", None)
         bug_summary = bug_event.model_dump(exclude={"traceback"})
         bug_summary["traceback_omitted"] = bool(bug_event.traceback)
         prompt = {
-            "role": "You are an automated Java repair agent. Output exactly one JSON action each turn.",
+            "role": "You are an automated Java repair agent. Use native function tools to inspect and repair Java bugs.",
             "rules": [
-                "Use only tools listed in Tools.",
+                "Use only the available function tools; do not describe tool calls in plain text.",
+                "Call exactly one function tool per turn.",
                 "Use bug_event.frames and frame_contexts to locate the failure; full traceback is omitted to avoid repeated stack noise.",
                 "Prefer the top business frame as the first repair target unless evidence points elsewhere.",
                 "Use search_code for project-scoped Java keyword searches; its root is enforced by runtime.",
@@ -106,14 +106,14 @@ class RepairAgent:
                 "After a successful edit, finish_patch triggers compile and test; do not skip them.",
                 "Return finish_patch only after a code edit has succeeded.",
             ],
-            "action_schema": {"tool": "search_code", "arguments": {"keyword": "ExceptionHandler"}, "reason": "why this step is needed"},
-            "finish_schema": {"tool": "finish_patch", "arguments": {}, "reason": "patch is ready for compile/test"},
+            "terminal_tools": {
+                "finish_patch": "Call after a successful edit_code when the patch is ready for compile/test.",
+            },
             "project": {"name": bug_event.project, "root": self.config.project.root},
             "bug_event": bug_summary,
             "frame_contexts": frame_contexts,
             "skills": skills,
             "session": prompt_session,
-            "tools": tool_specs,
         }
         return json.dumps(prompt, ensure_ascii=False, default=str)
         tool_usage_notes = [
@@ -189,22 +189,64 @@ class RepairAgent:
         skills = self._load_skills(bug_event.project)
         prompt_template = self.build_prompt_template(bug_event, skills, session)
         history: list[dict[str, Any]] = []
+        llm_messages: list[dict[str, Any]] = [{"role": "system", "content": prompt_template}]
         last_result: ToolResult | None = None
 
         print(f"[repair] start bug_id={bug_id} exception={bug_event.exception_type}", flush=True)
         for attempt in range(1, self.config.agent.max_retry + 1):
             print(f"[repair] attempt={attempt} bug_id={bug_id}", flush=True)
             modified = False
+            invalid_output_retries = 0
+            finish_without_patch_rejections = 0
             while True:
-                action = self._ask_llm(prompt_template, history, bug_event, session)
+                action = self._ask_llm(llm_messages, history, bug_event, session)
                 history.append(action)
                 tool_name = str(action.get("tool", ""))
                 print(f"[repair] action tool={tool_name} reason={action.get('reason', '')}", flush=True)
+                if tool_name == "__invalid_llm_output__":
+                    last_result = ToolResult(
+                        tool="llm_chat",
+                        success=False,
+                        exit_code=1,
+                        stdout_summary="",
+                        stderr_summary=str(action.get("reason", "invalid llm output")),
+                        data={"action": action},
+                        artifacts=[],
+                    )
+                    session["last_error"] = last_result.model_dump()
+                    self._append_session_tool_call(session, action, last_result)
+                    self._save_session(bug_id, session)
+                    history.append(
+                        {
+                            "tool": "llm_chat",
+                            "result": last_result.model_dump(),
+                            "feedback": "Rejected: native function call required. Use one available tool call, not prose.",
+                        }
+                    )
+                    self._append_tool_result_message(llm_messages, action, last_result)
+                    invalid_output_retries += 1
+                    if invalid_output_retries <= 2:
+                        print("[repair] invalid llm output rejected; requesting native tool_call again", flush=True)
+                        continue
+                    break
                 if tool_name == "finish_patch":
                     if not modified:
                         last_result = ToolResult(tool="finish_patch", success=False, exit_code=1, stdout_summary="no patch produced", stderr_summary="", data={}, artifacts=[])
                         session["last_error"] = last_result.model_dump()
+                        self._append_session_tool_call(session, action, last_result)
                         self._save_session(bug_id, session)
+                        history.append(
+                            {
+                                "tool": "finish_patch",
+                                "result": last_result.model_dump(),
+                                "feedback": "Rejected: finish_patch requires a successful edit_code in the current attempt. Use edit_code to produce a patch.",
+                            }
+                        )
+                        self._append_tool_result_message(llm_messages, action, last_result)
+                        finish_without_patch_rejections += 1
+                        if finish_without_patch_rejections <= 2:
+                            print("[repair] finish_patch rejected reason=no successful edit_code", flush=True)
+                            continue
                         break
                     compile_result = self._run_compile()
                     history.append({"tool": "RunCompileTool", "result": compile_result.model_dump()})
@@ -254,7 +296,9 @@ class RepairAgent:
                     last_result = ToolResult(tool=tool_name or "unknown", success=False, exit_code=1, stdout_summary="", stderr_summary=f"tool not found: {tool_name}", data={}, artifacts=[])
                     history.append({"tool": tool_name or "unknown", "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
+                    self._append_session_tool_call(session, action, last_result)
                     self._save_session(bug_id, session)
+                    self._append_tool_result_message(llm_messages, action, last_result)
                     continue
 
                 arguments = self._prepare_tool_arguments(tool.spec.name, action.get("arguments", {}), bug_event)
@@ -264,15 +308,19 @@ class RepairAgent:
                     last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={}, artifacts=[])
                     history.append({"tool": tool.spec.name, "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
+                    self._append_session_tool_call(session, action, last_result)
                     self._save_session(bug_id, session)
                     print(f"[repair] denied tool={tool.spec.name} reason={reason}", flush=True)
+                    self._append_tool_result_message(llm_messages, action, last_result)
                     continue
 
                 result = tool.run(arguments)
                 history.append({"tool": tool.spec.name, "result": result.model_dump()})
                 last_result = result
                 session["last_tool_result"] = result.model_dump()
+                self._append_session_tool_call(session, action, result)
                 self._save_session(bug_id, session)
+                self._append_tool_result_message(llm_messages, action, result)
                 print(f"[repair] tool={tool.spec.name} success={result.success} exit_code={result.exit_code}", flush=True)
                 if tool.spec.name == "edit_code" and result.success and self._is_valid_patch(result, session):
                     modified = True
@@ -350,7 +398,7 @@ class RepairAgent:
                     skills.append(value)
         return skills
 
-    def _ask_llm(self, prompt_template: str, history: list[dict[str, Any]], bug_event: BugEvent, session: dict[str, Any]) -> dict[str, Any]:
+    def _ask_llm(self, messages: list[dict[str, Any]], history: list[dict[str, Any]], bug_event: BugEvent, session: dict[str, Any]) -> dict[str, Any]:
         """请求 LLM 输出下一步动作。"""
         if self.llm_client is None:
             if not any(item.get("tool") == "edit_code" for item in history):
@@ -360,64 +408,149 @@ class RepairAgent:
                     return {"tool": "finish_patch", "arguments": {}, "reason": f"no local patch rule for {target_path}"}
                 return {"tool": "edit_code", "arguments": {"path": target_path, "content": content}, "reason": "create patch"}
             return {"tool": "finish_patch", "arguments": {}, "reason": "done"}
-        messages = [
-            {"role": "system", "content": prompt_template},
-            {"role": "user", "content": json.dumps(history, ensure_ascii=False)},
-        ]
-        response = self.llm_client.chat(messages)
+        response = self.llm_client.chat(messages, tools=self._openai_tools(), tool_choice="auto")
         artifact_path = response.data.get("artifact_path") if isinstance(response.data, dict) else ""
         if artifact_path:
             print(f"[repair] llm_call saved={artifact_path}", flush=True)
-        payload = response.data.get("content") if isinstance(response.data, dict) else None
+        if not response.success:
+            return self._invalid_llm_action(f"llm call failed: {response.stderr_summary}")
+        tool_calls = response.data.get("tool_calls") if isinstance(response.data, dict) else None
+        content = response.data.get("content") if isinstance(response.data, dict) else ""
+        if isinstance(tool_calls, list) and tool_calls:
+            tool_call = tool_calls[0]
+            messages.append(self._assistant_tool_call_message(tool_call, str(content or "")))
+            return self._tool_call_to_action(tool_call)
+        payload = content
         if isinstance(payload, str):
+            messages.append({"role": "assistant", "content": payload})
             parsed_payload = self._parse_llm_action_payload(payload)
             if parsed_payload is None:
-                return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm output"}
+                return self._invalid_llm_action("invalid llm output: expected a native function tool_call")
             return self._normalize_llm_action(parsed_payload)
-        return {"tool": "finish_patch", "arguments": {}, "reason": "no llm output"}
+        return self._invalid_llm_action("no llm output")
+
+    def _openai_tools(self) -> list[dict[str, Any]]:
+        """Convert registered tools plus virtual terminal actions to OpenAI function tools."""
+        specs = [tool.spec for tool in self.registry.list_tools()]
+        specs.extend(self._virtual_tool_specs())
+        return [self._tool_spec_to_openai_tool(spec) for spec in specs]
+
+    def _virtual_tool_specs(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(
+                name="finish_patch",
+                description="Finish the repair after a successful edit_code. Runtime will compile, test, create a PR, and request review.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"reason": {"type": "string", "description": "Why the patch is ready for compile and test."}},
+                    "required": ["reason"],
+                    "additionalProperties": False,
+                },
+                permission="READ_ONLY",
+                executor="virtual",
+            ),
+        ]
+
+    def _tool_spec_to_openai_tool(self, spec: ToolSpec) -> dict[str, Any]:
+        parameters = dict(spec.input_schema or {})
+        if parameters.get("type") != "object":
+            parameters = {"type": "object", "properties": {}, "additionalProperties": False}
+        parameters.setdefault("properties", {})
+        return {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": parameters,
+            },
+        }
+
+    def _assistant_tool_call_message(self, tool_call: dict[str, Any], content: str = "") -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": content or None,
+            "tool_calls": [
+                {
+                    "id": str(tool_call.get("id") or ""),
+                    "type": str(tool_call.get("type") or "function"),
+                    "function": dict(tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}),
+                }
+            ],
+        }
+
+    def _tool_call_to_action(self, tool_call: dict[str, Any]) -> dict[str, Any]:
+        function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+        name = str(function.get("name") or "")
+        raw_arguments = function.get("arguments") or "{}"
+        try:
+            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        except json.JSONDecodeError:
+            return self._invalid_llm_action(f"invalid tool arguments JSON for {name}", call_id=str(tool_call.get("id") or ""))
+        if not isinstance(arguments, dict):
+            return self._invalid_llm_action(f"invalid tool arguments for {name}: expected object", call_id=str(tool_call.get("id") or ""))
+        reason = str(arguments.get("reason") or arguments.get("evidence") or "native function call")
+        return {"tool": name, "arguments": arguments, "reason": reason, "tool_call_id": str(tool_call.get("id") or "")}
+
+    def _append_tool_result_message(self, messages: list[dict[str, Any]], action: dict[str, Any], result: ToolResult) -> None:
+        call_id = str(action.get("tool_call_id") or "")
+        content = self._tool_result_content(result)
+        if call_id:
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
+            return
+        messages.append({"role": "user", "content": content})
+
+    def _tool_result_content(self, result: ToolResult) -> str:
+        return json.dumps(result.model_dump(), ensure_ascii=False, default=str)
+
+    def _append_session_tool_call(self, session: dict[str, Any], action: dict[str, Any], result: ToolResult) -> None:
+        calls = session.get("tool_calls", [])
+        if not isinstance(calls, list):
+            calls = []
+        calls.append(
+            {
+                "tool_call_id": str(action.get("tool_call_id") or ""),
+                "name": str(action.get("tool") or ""),
+                "arguments": action.get("arguments", {}) if isinstance(action.get("arguments", {}), dict) else {},
+                "result": result.model_dump(),
+            }
+        )
+        session["tool_calls"] = calls
 
     def _parse_llm_action_payload(self, payload: str) -> Any | None:
-        """Parse a model response that may wrap the JSON action in prose or fences."""
+        """Parse a model response only when the entire payload is pure JSON."""
         text = payload.strip()
         if not text:
             return None
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            pass
-
-        fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
-        for block in fenced_blocks:
-            try:
-                return json.loads(block.strip())
-            except json.JSONDecodeError:
-                continue
-
-        decoder = json.JSONDecoder()
-        for match in re.finditer(r"[\{\[]", text):
-            try:
-                parsed, _ = decoder.raw_decode(text[match.start() :])
-                return parsed
-            except json.JSONDecodeError:
-                continue
-        return None
+            return None
 
     def _normalize_llm_action(self, payload: Any) -> dict[str, Any]:
         """Convert model output into exactly one executable action."""
         if isinstance(payload, dict):
-            return payload
-        if isinstance(payload, list):
-            candidates = [
-                item
-                for item in payload
-                if isinstance(item, dict)
-                and isinstance(item.get("tool"), str)
-                and "arguments" in item
-                and "result" not in item
-            ]
-            if candidates:
-                return candidates[-1]
-        return {"tool": "finish_patch", "arguments": {}, "reason": "invalid llm action shape"}
+            tool = payload.get("tool")
+            arguments = payload.get("arguments")
+            reason = payload.get("reason")
+            if not isinstance(tool, str) or not tool.strip():
+                return self._invalid_llm_action("invalid llm action: tool must be a non-empty string")
+            if arguments is None:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                return self._invalid_llm_action("invalid llm action: arguments must be an object")
+            if reason is None:
+                reason = ""
+            if not isinstance(reason, str):
+                return self._invalid_llm_action("invalid llm action: reason must be a string")
+            return {"tool": tool.strip(), "arguments": arguments, "reason": reason}
+        return self._invalid_llm_action("invalid llm action: top-level JSON must be an object")
+
+    def _invalid_llm_action(self, reason: str, call_id: str = "") -> dict[str, Any]:
+        """Return a non-executable action used to fail the current LLM attempt."""
+        action = {"tool": "__invalid_llm_output__", "arguments": {}, "reason": reason}
+        if call_id:
+            action["tool_call_id"] = call_id
+        return action
 
     def _pick_patch_target(self, bug_event: BugEvent, session: dict[str, Any]) -> str:
         """从上下文中选择真实源码文件作为补丁目标。"""
@@ -519,27 +652,39 @@ class RepairAgent:
             return False
         if not normalized.endswith(".java"):
             return False
+        try:
+            patch_path = Path(path).resolve()
+            project_root = Path(self.config.project.root).resolve()
+        except OSError:
+            return False
         frame_contexts = session.get("frame_contexts", [])
         if isinstance(frame_contexts, list) and frame_contexts:
-            patch_path = Path(path)
             for context in frame_contexts:
                 if not isinstance(context, dict):
                     continue
                 context_path = str(context.get("filePath", ""))
                 try:
-                    if Path(context_path).resolve() == patch_path.resolve():
+                    if Path(context_path).resolve() == patch_path:
                         return True
                 except OSError:
                     if context_path.replace("\\", "/").lower() == path.replace("\\", "/").lower():
                         return True
-            return False
 
-        project_root = Path(self.config.project.root).resolve()
         try:
-            patch_path = Path(path).resolve()
-        except OSError:
+            relative_path = patch_path.relative_to(project_root)
+        except ValueError:
             return False
-        return patch_path.is_relative_to(project_root)
+        if self._is_project_java_source_path(relative_path):
+            return True
+        return not isinstance(frame_contexts, list) or not frame_contexts
+
+    def _is_project_java_source_path(self, relative_path: Path) -> bool:
+        """Return True for Java source or test source files inside a project."""
+        parts = [part.lower() for part in relative_path.parts]
+        for index in range(len(parts) - 2):
+            if parts[index : index + 3] in (["src", "main", "java"], ["src", "test", "java"]):
+                return True
+        return False
 
     def _create_pr(self, task: RepairTask, bug_event: BugEvent, history: list[dict[str, Any]]) -> ToolResult:
         """Create a real branch, push it, and open a Gitee pull request."""

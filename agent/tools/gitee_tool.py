@@ -25,7 +25,15 @@ class GiteeTool(BaseTool):
         return ToolSpec(
             name="gitee_tool",
             description="Create/get Gitee pull request",
-            input_schema={"type": "object", "properties": {"action": {"type": "string"}, "args": {"type": "object"}}},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create_pull_request"], "description": "Gitee operation to run."},
+                    "args": {"type": "object", "description": "Pull request creation arguments."},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
             permission=PermissionType.VCS_WRITE.value,
             executor="local",
         )

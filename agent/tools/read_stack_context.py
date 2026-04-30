@@ -33,10 +33,15 @@ class ReadStackContextTool(BaseTool):
 			input_schema={
 				"type": "object",
 				"properties": {
-					"traceback": {"type": "string"},
-					"frames": {"type": "array"},
-					"package_prefix": {"type": "string"},
+					"traceback": {"type": "string", "description": "Raw Java traceback text to resolve."},
+					"frames": {
+						"type": "array",
+						"description": "Optional parsed stack frames.",
+						"items": {"type": "object"},
+					},
+					"package_prefix": {"type": "string", "description": "Optional Java package prefix used to filter business frames."},
 				},
+				"additionalProperties": False,
 			},
 			permission=PermissionType.READ_ONLY.value,
 			executor="local",

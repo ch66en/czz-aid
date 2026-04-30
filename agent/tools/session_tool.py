@@ -6,7 +6,7 @@ from typing import Any
 
 from agent.models import ToolResult, ToolSpec
 from agent.storage.session_store import SessionStore
-from agent.tools.base import BaseTool
+from agent.tools.base import BaseTool, PermissionType
 
 
 class SessionTool(BaseTool):
@@ -19,7 +19,25 @@ class SessionTool(BaseTool):
     @property
     def spec(self) -> ToolSpec:
         """返回会话工具的规格说明。"""
-        return ToolSpec(name="session_tool", description="Read and write session data")
+        return ToolSpec(
+            name="session_tool",
+            description="Read or write session data by key.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Session key to read or write."},
+                    "value": {"description": "Optional JSON value to write. Omit to read."},
+                },
+                "required": ["key"],
+                "additionalProperties": False,
+            },
+            permission=PermissionType.READ_ONLY.value,
+            executor="local",
+        )
+
+    @property
+    def permission(self) -> PermissionType:
+        return PermissionType.READ_ONLY
 
     def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """根据是否提供值决定读取或写入会话数据。"""

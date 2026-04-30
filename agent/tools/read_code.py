@@ -26,11 +26,12 @@ class ReadCodeTool(BaseTool):
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
+                    "path": {"type": "string", "description": "Absolute or project-relative path to a code file."},
+                    "start_line": {"type": "integer", "description": "Optional 1-based first line to read."},
+                    "end_line": {"type": "integer", "description": "Optional 1-based last line to read."},
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             },
             permission=PermissionType.READ_ONLY.value,
             executor="local",

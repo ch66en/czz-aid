@@ -25,6 +25,7 @@ class SearchCodeTool(BaseTool):
                     "root": {"type": "string", "description": "Optional search root. Runtime overrides this to the BugEvent project root."},
                 },
                 "required": ["keyword"],
+                "additionalProperties": False,
             },
             permission=PermissionType.READ_ONLY.value,
             executor="local",

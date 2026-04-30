@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 from agent.config import AppConfig
 from agent.models import ToolResult
 from agent.tools.git_tool import GitTool
@@ -37,6 +39,26 @@ def test_git_tool_rejects_commit_without_message() -> None:
 
     assert result.success is False
     assert "message is required" in result.stderr_summary
+
+
+def test_git_tool_runs_real_branch_diff(tmp_path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    source = tmp_path / "Demo.java"
+    source.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Demo.java"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    base_branch = subprocess.run(["git", "branch", "--show-current"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "checkout", "-B", "agent-fix/demo"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    source.write_text("class Demo { int x = 2; }\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "fix"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    result = GitTool(AppConfig(project={"root": str(tmp_path)})).run({"action": "diff", "args": {"base": base_branch, "target": "agent-fix/demo"}})
+
+    assert result.success is True
+    assert "int x = 2" in result.stdout_summary
+    assert result.data["changed_files"] == ["Demo.java"]
 
 
 def test_gitee_tool_creates_complete_pr_dry_run_without_token(monkeypatch) -> None:

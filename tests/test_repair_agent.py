@@ -47,6 +47,35 @@ class RecordingFeishuTool:
         return ToolResult(tool="feishu_tool", success=True, exit_code=0, stdout_summary="sent", stderr_summary="", data={"dry_run": False}, artifacts=[])
 
 
+class NativeToolCallLLM:
+    def __init__(self) -> None:
+        self.last_messages: list[dict[str, object]] | None = None
+        self.last_tools: list[dict[str, object]] | None = None
+        self.last_tool_choice: object = None
+
+    def chat(self, messages, tools=None, tool_choice=None):
+        self.last_messages = messages
+        self.last_tools = tools
+        self.last_tool_choice = tool_choice
+        return ToolResult(
+            tool="llm_chat",
+            success=True,
+            exit_code=0,
+            data={
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-read-1",
+                        "type": "function",
+                        "function": {"name": "read_code", "arguments": '{"path":"Demo.java","start_line":1,"end_line":3}'},
+                    }
+                ],
+                "artifact_path": "",
+            },
+            artifacts=[],
+        )
+
+
 def test_repair_agent_builds_prompt_template() -> None:
     config = AppConfig()
     agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
@@ -58,11 +87,47 @@ def test_repair_agent_builds_prompt_template() -> None:
     assert "compile and test" in prompt
     assert "project-scoped Java keyword searches" in prompt
     assert "finish_patch" in prompt
+    assert "no_fix_needed" not in prompt
     assert "BUG-1" in prompt
     assert "traceback" not in payload["bug_event"]
     assert payload["bug_event"]["traceback_omitted"] is True
     assert payload["frame_contexts"] == [{"filePath": "Demo.java"}]
     assert "frame_contexts" not in payload["session"]
+    assert "tools" not in payload
+
+
+def test_repair_agent_converts_tools_to_openai_function_specs() -> None:
+    agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+
+    tools = agent._openai_tools()
+    names = {tool["function"]["name"] for tool in tools}
+    read_code = next(tool for tool in tools if tool["function"]["name"] == "read_code")
+
+    assert "read_code" in names
+    assert "finish_patch" in names
+    assert "no_fix_needed" not in names
+    assert read_code["type"] == "function"
+    assert read_code["function"]["parameters"]["additionalProperties"] is False
+
+
+def test_repair_agent_uses_native_tool_call_message_history() -> None:
+    llm = NativeToolCallLLM()
+    agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore(), llm_client=llm)
+    bug_event = BugEvent(bug_id="BUG-1", source="log", project="demo", title="t", exception_type="E", message="m", fingerprint="fp")
+    messages = [{"role": "system", "content": "{}"}]
+
+    action = agent._ask_llm(messages, [], bug_event, {})
+    result = ToolResult(tool="read_code", success=True, exit_code=0, stdout_summary="ok")
+    agent._append_tool_result_message(messages, action, result)
+
+    assert llm.last_tool_choice == "auto"
+    assert llm.last_tools is not None
+    assert action["tool"] == "read_code"
+    assert action["arguments"]["path"] == "Demo.java"
+    assert messages[-2]["role"] == "assistant"
+    assert messages[-2]["tool_calls"][0]["id"] == "call-read-1"
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "call-read-1"
 
 
 def test_repair_agent_defaults_search_code_root_to_bug_project_root(tmp_path: Path) -> None:
@@ -78,17 +143,18 @@ def test_repair_agent_defaults_search_code_root_to_bug_project_root(tmp_path: Pa
     assert arguments["keyword"] == "ExceptionHandler"
 
 
-def test_repair_agent_normalizes_list_llm_output_to_single_action() -> None:
+def test_repair_agent_rejects_list_llm_output() -> None:
     agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
 
     action = agent._normalize_llm_action([
         {"tool": "search_code", "arguments": {"keyword": "ExceptionHandler"}, "reason": "find handler"}
     ])
 
-    assert action == {"tool": "search_code", "arguments": {"keyword": "ExceptionHandler"}, "reason": "find handler"}
+    assert action["tool"] == "__invalid_llm_output__"
+    assert "top-level JSON must be an object" in action["reason"]
 
 
-def test_repair_agent_extracts_json_action_from_markdown_response() -> None:
+def test_repair_agent_rejects_json_action_from_markdown_response() -> None:
     agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
 
     payload = (
@@ -103,6 +169,14 @@ def test_repair_agent_extracts_json_action_from_markdown_response() -> None:
     )
 
     parsed = agent._parse_llm_action_payload(payload)
+
+    assert parsed is None
+
+
+def test_repair_agent_accepts_pure_json_action() -> None:
+    agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+
+    parsed = agent._parse_llm_action_payload('{"tool":"read_code","arguments":{"path":"MallUser.java"},"reason":"Examine getProfileJson"}')
     action = agent._normalize_llm_action(parsed)
 
     assert action == {
@@ -168,6 +242,46 @@ def test_repair_agent_builds_patch_from_current_source_spacing(tmp_path: Path) -
     assert "-        int pivot = arr[right+1];" in patch
     assert "+        int pivot = arr[right];" in patch
     assert "position: \" + right" in patch
+
+
+def _test_project_root() -> Path:
+    return Path(Path.cwd().anchor) / "czz_aid_test_project" / "mall-service"
+
+
+def test_repair_agent_accepts_project_advice_patch_with_frame_context() -> None:
+    project_root = _test_project_root()
+    frame_file = project_root / "src" / "main" / "java" / "com" / "demo" / "service" / "OrderService.java"
+    advice_file = project_root / "src" / "main" / "java" / "com" / "demo" / "advice" / "GlobalExceptionHandler.java"
+    config = AppConfig()
+    config.project.root = str(project_root)
+    agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+    result = ToolResult(tool="edit_code", success=True, exit_code=0, data={"path": str(advice_file)}, artifacts=[str(advice_file)])
+
+    assert agent._is_valid_patch(result, {"frame_contexts": [{"filePath": str(frame_file)}]}) is True
+
+
+def test_repair_agent_accepts_project_test_patch_with_frame_context() -> None:
+    project_root = _test_project_root()
+    frame_file = project_root / "src" / "main" / "java" / "com" / "demo" / "controller" / "OrderController.java"
+    test_file = project_root / "src" / "test" / "java" / "com" / "demo" / "controller" / "OrderControllerTest.java"
+    config = AppConfig()
+    config.project.root = str(project_root)
+    agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+    result = ToolResult(tool="edit_code", success=True, exit_code=0, data={"path": str(test_file)}, artifacts=[str(test_file)])
+
+    assert agent._is_valid_patch(result, {"frame_contexts": [{"filePath": str(frame_file)}]}) is True
+
+
+def test_repair_agent_rejects_project_java_outside_source_roots_with_frame_context() -> None:
+    project_root = _test_project_root()
+    frame_file = project_root / "src" / "main" / "java" / "com" / "demo" / "service" / "OrderService.java"
+    scratch_file = project_root / "docs" / "Scratch.java"
+    config = AppConfig()
+    config.project.root = str(project_root)
+    agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+    result = ToolResult(tool="edit_code", success=True, exit_code=0, data={"path": str(scratch_file)}, artifacts=[str(scratch_file)])
+
+    assert agent._is_valid_patch(result, {"frame_contexts": [{"filePath": str(frame_file)}]}) is False
 
 
 def test_repair_agent_parses_gitee_remote_url() -> None:

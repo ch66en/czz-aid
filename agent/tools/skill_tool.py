@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.models import ToolCallResult, ToolSpec
+from agent.models import ToolResult, ToolSpec
 from agent.storage.skill_store import SkillStore
-from agent.tools.base import BaseTool
+from agent.tools.base import BaseTool, PermissionType
 
 
 class SkillTool(BaseTool):
@@ -19,14 +19,32 @@ class SkillTool(BaseTool):
     @property
     def spec(self) -> ToolSpec:
         """返回技能工具的规格说明。"""
-        return ToolSpec(name="skill_tool", description="Read and write skill data")
+        return ToolSpec(
+            name="skill_tool",
+            description="Read or write reusable repair skill data by key.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Skill key to read or write."},
+                    "value": {"type": "string", "description": "Optional skill body to write. Omit to read."},
+                },
+                "required": ["key"],
+                "additionalProperties": False,
+            },
+            permission=PermissionType.READ_ONLY.value,
+            executor="local",
+        )
 
-    def run(self, payload: dict[str, Any] | None = None) -> ToolCallResult:
+    @property
+    def permission(self) -> PermissionType:
+        return PermissionType.READ_ONLY
+
+    def run(self, payload: dict[str, Any] | None = None) -> ToolResult:
         """根据是否提供值决定读取或写入技能数据。"""
         data = payload or {}
         key = str(data.get("key", ""))
         value = data.get("value")
         if value is None:
-            return ToolCallResult(success=True, output=str(self.skill_store.get(key)))
+            return ToolResult(tool="skill_tool", success=True, exit_code=0, stdout_summary=str(self.skill_store.get(key)), data={"key": key}, artifacts=[])
         self.skill_store.put(key, str(value))
-        return ToolCallResult(success=True, output=key)
+        return ToolResult(tool="skill_tool", success=True, exit_code=0, stdout_summary=key, data={"key": key}, artifacts=[])

@@ -1,18 +1,18 @@
 env: dev
-workspace: E:\resourse\code\java\mall-service
+workspace: E:\Project\mall-service
 project:
   name: mall-service
-  root: E:\resourse\code\java\mall-service
+  root: E:\Project\mall-service
   language: java
   default_branch: master
 llm:
   base_url: https://token-plan-cn.xiaomimimo.com/v1
-  api_key:
+  api_key: tp-ccu9ew24g4nag88sb7r5tr74t1vkvxzyruvmwc5xc60chs85
   model: mimo-v2.5-pro
   timeout_seconds: 60
 gitee:
   base_url: https://gitee.com/api/v5
-  token:
+  token: 0550864d151471528e9f91af6fc92087
   owner: ch6enle
   repo: mall-service
 feishu:
@@ -35,4 +35,4 @@ agent:
   reflection_enabled: true
   review_required: true
   watch_paths:
-    - "E:\\resourse\\code\\java\\mall-service\\logs\\app.log"
+    - "E:\\Project\\mall-service\\logs\\app.log"

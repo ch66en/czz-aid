@@ -21,7 +21,18 @@ class RunCommandTool(BaseTool):
     @property
     def spec(self) -> ToolSpec:
         """返回命令执行工具的规格说明。"""
-        return ToolSpec(name="run_command", description="Run a shell command", input_schema={"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, permission=PermissionType.TEST_EXECUTION.value, executor="local")
+        return ToolSpec(
+            name="run_command",
+            description="Run an allowed project shell command from the configured project root.",
+            input_schema={
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "Command to run. Dangerous commands are rejected by the permission guard."}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            permission=PermissionType.TEST_EXECUTION.value,
+            executor="local",
+        )
 
     @property
     def permission(self) -> PermissionType:

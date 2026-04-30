@@ -19,11 +19,12 @@ class AstSymbolsTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="ast_symbols",
-            description="Extract Java AST symbols",
+            description="Extract Java AST symbols from a Java source file.",
             input_schema={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {"path": {"type": "string", "description": "Absolute or project-relative path to a Java source file."}},
                 "required": ["path"],
+                "additionalProperties": False,
             },
             permission=PermissionType.READ_ONLY.value,
             executor="local",

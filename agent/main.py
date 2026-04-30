@@ -77,7 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pipeline = IngestionPipeline(session_store=session_store, dedup_engine=DedupEngine(), sanitizer=Sanitizer(), traceback_parser=TracebackParser(), repair_agent=repair_agent)
     doctor = Doctor(config=config)
-    reflection = ReflectionSubAgent(config=config, session_store=session_store, skill_store=skill_store)
+    reflection = ReflectionSubAgent(config=config, session_store=session_store, skill_store=skill_store, llm_client=llm_client)
 
     if args.command == "doctor":
         print(doctor.run())
