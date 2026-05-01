@@ -29,6 +29,7 @@ class ToolContext:
     allowed_paths: list[Path] = field(default_factory=list)
     forbidden_paths: list[Path] = field(default_factory=list)
     allowed_commands: list[str] = field(default_factory=list)
+    allowed_command_patterns: list[str] = field(default_factory=list)
 
 
 class BaseTool(ABC):

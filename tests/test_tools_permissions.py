@@ -55,7 +55,11 @@ def test_run_command_requires_whitelist_and_blocks_dangerous_commands() -> None:
     """命令执行工具必须遵守白名单并阻止危险命令。"""
     guard = PermissionGuard()
     tool = RunCommandTool()
-    context = ToolContext(permission_mode={PermissionType.TEST_EXECUTION}, allowed_commands=["pytest", "python", "git"])
+    context = ToolContext(permission_mode={PermissionType.TEST_EXECUTION}, allowed_commands=["mvn", "pytest", "python", "git"])
+
+    allowed, reason = guard.can_execute(tool.spec, context, {"command": "mvn test"})
+    assert allowed is True
+    assert reason == "allowed"
 
     allowed, reason = guard.can_execute(tool.spec, context, {"command": "pytest"})
     assert allowed is True

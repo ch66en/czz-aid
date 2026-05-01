@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """定义工具权限检查逻辑。"""
 
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,12 @@ from agent.tools.base import PermissionType, ToolContext
 class PermissionGuard:
     """负责判断工具是否可以在当前阶段直接执行。"""
 
-    _FORBIDDEN_COMMAND_TOKENS = {"rm", "sudo", "chmod", "ssh", "scp"}
+    _FORBIDDEN_COMMAND_TOKENS = {"rm", "sudo", "chmod", "ssh", "scp", "del", "erase", "rmdir"}
+    _FORBIDDEN_COMMAND_PATTERNS = [
+        re.compile(r"(?:^|\s)(?:rm\s+-rf|rm\s+-fr|del\b|erase\b|rmdir\b|sudo\b|chmod\b)", re.IGNORECASE),
+        re.compile(r"\|\s*(?:bash|sh|powershell|cmd\.exe)\b", re.IGNORECASE),
+        re.compile(r"(?:^|\s)(?:git\s+reset\s+--hard|git\s+push\s+--force|git\s+clean\s+-fdx)", re.IGNORECASE),
+    ]
 
     def is_allowed(self, spec: ToolSpec) -> bool:
         """根据权限类型判断工具是否属于默认可执行。"""
@@ -49,14 +55,35 @@ class PermissionGuard:
         command = str(payload.get("command", "")).strip()
         if not command:
             return False, "empty command"
+
         tokens = shlex.split(command, posix=False)
         if not tokens:
             return False, "empty command"
+
+        normalized_command = command.lower()
+        if any(pattern.search(command) for pattern in self._FORBIDDEN_COMMAND_PATTERNS):
+            return False, "dangerous command denied"
+
         lower_tokens = {token.lower() for token in tokens}
         if lower_tokens & self._FORBIDDEN_COMMAND_TOKENS:
             return False, "dangerous command denied"
-        if context.allowed_commands and tokens[0] not in context.allowed_commands:
+
+        if context.allowed_command_patterns and not any(re.fullmatch(pattern, command, flags=re.IGNORECASE) for pattern in context.allowed_command_patterns):
             return False, "command not in whitelist"
+
+        if context.allowed_commands:
+            allowed = {cmd.lower() for cmd in context.allowed_commands}
+            if tokens[0].lower() not in allowed:
+                return False, "command not in whitelist"
+            if tokens[0].lower() == "mvn":
+                return True, "allowed"
+
+        if normalized_command.startswith("mvn ") or normalized_command == "mvn":
+            return True, "allowed"
+
+        if not context.allowed_commands:
+            return False, "command not in whitelist"
+
         return True, "allowed"
 
     def _is_under(self, target: Path, root: Path) -> bool:

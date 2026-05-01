@@ -18,6 +18,7 @@ class ProjectConfig(BaseModel):
     default_branch: str = "main"
     compile_command: str = "mvn compile"
     test_command: str = "mvn test"
+    allowed_commands: list[str] = Field(default_factory=lambda: ["mvn", "git", "python", "pytest", "ruff", "java", "javac"])
 
 
 class LLMConfig(BaseModel):
