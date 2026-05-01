@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import shlex
+import subprocess
 from typing import Any
 
 from agent.config import AppConfig
@@ -73,9 +75,24 @@ class EditCodeTool(BaseTool):
             return ToolResult(tool="edit_code", success=False, exit_code=1, stdout_summary=str(path), stderr_summary="patch did not change file", data={"path": str(path)}, artifacts=[str(path)])
         path.write_text(patched, encoding="utf-8")
 
+        lint_result = self._run_lint(path)
+        if lint_result is not None and not lint_result["passed"]:
+            path.write_text(original, encoding="utf-8")
+            return ToolResult(
+                tool="edit_code", success=False, exit_code=1,
+                stdout_summary=str(path),
+                stderr_summary=f"lint failed:\n{lint_result['output']}",
+                data={"path": str(path), "original_content": original, "file_existed": file_existed, "lint_passed": False, "lint_output": lint_result["output"]},
+                artifacts=[str(path)],
+            )
+
         return ToolResult(
             tool="edit_code", success=True, exit_code=0, stdout_summary=str(path), stderr_summary="",
-            data={"path": str(path), "original_content": original, "file_existed": file_existed},
+            data={
+                "path": str(path), "original_content": original, "file_existed": file_existed,
+                "lint_passed": lint_result["passed"] if lint_result else None,
+                "lint_output": lint_result["output"] if lint_result else "",
+            },
             artifacts=[str(path)],
         )
 
@@ -174,3 +191,39 @@ class EditCodeTool(BaseTool):
             return path
         project_root = Path(self.config.project.root).expanduser()
         return project_root / path
+
+    def _run_lint(self, file_path: Path) -> dict[str, Any] | None:
+        """对编辑后的文件执行 lint 检查。返回 None 表示未配置 lint。"""
+        if self.config is None:
+            return None
+        lint_command = self.config.project.lint_command.strip()
+        if not lint_command:
+            return None
+
+        command = lint_command.replace("{file}", str(file_path))
+        try:
+            tokens = shlex.split(command, posix=False)
+        except ValueError:
+            tokens = command.split()
+
+        cwd = Path(self.config.project.root) if self.config.project.root != "." else file_path.parent
+
+        try:
+            completed = subprocess.run(
+                tokens,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return {"passed": False, "output": "lint timed out after 30s"}
+        except FileNotFoundError:
+            return {"passed": False, "output": f"lint command not found: {tokens[0]}"}
+
+        output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
+        return {"passed": completed.returncode == 0, "output": output[:4000]}

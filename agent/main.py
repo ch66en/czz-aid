@@ -23,6 +23,7 @@ from agent.reflection.reflection_subagent import ReflectionSubAgent
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.storage.task_store import TaskStore
+from agent.ui import print_banner, info, success as ui_success, error as ui_error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,9 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """根据命令行参数执行对应的代理流程。"""
+    print_banner()
     parser = build_parser()
     args = parser.parse_args(argv)
     config = load_config("config.example.yaml")
+
+    info(f"env={config.env}  workspace={config.workspace}")
+    info(f"project={config.project.name}  language={config.project.language}")
+    print()
 
     registry = ToolRegistry()
     permission_guard = PermissionGuard()
@@ -115,14 +121,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if result.repair_result is not None:
             repair_result = result.repair_result
-            print(f"repair status={repair_result.status} success={repair_result.success} message={repair_result.message}")
+            if repair_result.success:
+                ui_success(f"Repair finished  status={repair_result.status}  message={repair_result.message}")
+            else:
+                ui_error(f"Repair finished  status={repair_result.status}  message={repair_result.message}")
             if repair_result.last_result is not None:
                 last = repair_result.last_result
-                print(f"last tool={last.tool} success={last.success} exit_code={last.exit_code}")
+                info(f"last tool={last.tool} success={last.success} exit_code={last.exit_code}")
                 if last.stderr_summary:
-                    print(f"last error={last.stderr_summary}")
+                    ui_error(f"last error={last.stderr_summary}")
         else:
-            print(result)
+            info(str(result))
         return 0
     if args.command == "reflect":
         print(reflection.reflect(args.bug_id, args.result))

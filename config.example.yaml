@@ -5,6 +5,7 @@ project:
   root: E:\resourse\code\java\mall-service
   language: java
   default_branch: master
+  # lint_command: "javac -Xlint:all -d /tmp/auto-fix-lint {file}"
 llm:
   base_url: https://token-plan-cn.xiaomimimo.com/v1
   api_key: tp-ccu9ew24g4nag88sb7r5tr74t1vkvxzyruvmwc5xc60chs85

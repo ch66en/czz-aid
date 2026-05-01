@@ -32,6 +32,7 @@ from agent.tools.read_symbol_at_tool import ReadSymbolAtTool
 from agent.tools.run_command import RunCommandTool
 from agent.tools.search_code import SearchCodeTool
 from agent.tools.test_tool import RunTestTool
+import agent.ui as ui
 
 
 @dataclass(slots=True)
@@ -192,17 +193,18 @@ class RepairAgent:
         llm_messages: list[dict[str, Any]] = [{"role": "system", "content": prompt_template}]
         last_result: ToolResult | None = None
 
-        print(f"[repair] start bug_id={bug_id} exception={bug_event.exception_type}", flush=True)
+        ui.step(f"Starting repair  bug_id={bug_id}  exception={bug_event.exception_type}")
         for attempt in range(1, self.config.agent.max_retry + 1):
-            print(f"[repair] attempt={attempt} bug_id={bug_id}", flush=True)
+            ui.attempt(attempt, self.config.agent.max_retry, bug_id)
             modified = False
             invalid_output_retries = 0
             finish_without_patch_rejections = 0
             while True:
+                ui.thinking("Waiting for LLM response")
                 action = self._ask_llm(llm_messages, history, bug_event, session)
                 history.append(action)
                 tool_name = str(action.get("tool", ""))
-                print(f"[repair] action tool={tool_name} reason={action.get('reason', '')}", flush=True)
+                ui.tool_call(tool_name or "unknown", action.get("reason", ""))
                 if tool_name == "__invalid_llm_output__":
                     last_result = ToolResult(
                         tool="llm_chat",
@@ -226,7 +228,7 @@ class RepairAgent:
                     self._append_tool_result_message(llm_messages, action, last_result)
                     invalid_output_retries += 1
                     if invalid_output_retries <= 2:
-                        print("[repair] invalid llm output rejected; requesting native tool_call again", flush=True)
+                        ui.warning("Invalid LLM output rejected; requesting native tool_call again")
                         continue
                     break
                 if tool_name == "finish_patch":
@@ -245,14 +247,14 @@ class RepairAgent:
                         self._append_tool_result_message(llm_messages, action, last_result)
                         finish_without_patch_rejections += 1
                         if finish_without_patch_rejections <= 2:
-                            print("[repair] finish_patch rejected reason=no successful edit_code", flush=True)
+                            ui.warning("finish_patch rejected: no successful edit_code")
                             continue
                         break
                     compile_result = self._run_compile()
                     history.append({"tool": "RunCompileTool", "result": compile_result.model_dump()})
                     session["compile_result"] = compile_result.model_dump()
                     self._save_session(bug_id, session)
-                    print(f"[repair] compile success={compile_result.success} exit_code={compile_result.exit_code}", flush=True)
+                    ui.compile_result(compile_result.success, compile_result.exit_code)
                     if not compile_result.success:
                         rollback_result = self._rollback_git_changes(history, bug_event)
                         history.append({"tool": "Rollback", "result": rollback_result.model_dump()})
@@ -264,7 +266,7 @@ class RepairAgent:
                     history.append({"tool": "RunTestTool", "result": test_result.model_dump()})
                     session["test_result"] = test_result.model_dump()
                     self._save_session(bug_id, session)
-                    print(f"[repair] test success={test_result.success} exit_code={test_result.exit_code}", flush=True)
+                    ui.test_result(test_result.success, test_result.exit_code)
                     if not test_result.success:
                         rollback_result = self._rollback_git_changes(history, bug_event)
                         history.append({"tool": "Rollback", "result": rollback_result.model_dump()})
@@ -280,7 +282,7 @@ class RepairAgent:
                         last_result = pr_result
                         self.task_manager.update_status(bug_id, TaskStatus.FAILED)
                         self._send_feishu_help(bug_event, session, last_result)
-                        print(f"[repair] create_pr failed bug_id={bug_id} error={pr_result.stderr_summary}", flush=True)
+                        ui.error(f"Create PR failed  bug_id={bug_id}  error={pr_result.stderr_summary}")
                         return RepairRunResult(False, "failed", "create pr failed", task=task, last_result=pr_result, prompt_template=prompt_template, history=history)
                     pr_url = str(pr_result.data.get("pr_url") or pr_result.stdout_summary)
                     agent_branch = str(pr_result.data.get("branch") or task.agent_branch or self._repair_branch_name(bug_event.bug_id))
@@ -301,12 +303,12 @@ class RepairAgent:
                         self.task_manager.update_status(bug_id, TaskStatus.REVIEWING)
                         session["status"] = "reviewing"
                         self._save_session(bug_id, session)
-                        print(f"[repair] review requested bug_id={bug_id} pr_url={pr_url} feishu_success={review_result.success}", flush=True)
+                        ui.review_requested(pr_url)
                         return RepairRunResult(True, "reviewing", "repair succeeded; review requested", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
                     task.status = TaskStatus.PASSED
                     self.task_manager.update_status(bug_id, TaskStatus.PASSED)
                     self._save_session(bug_id, session)
-                    print(f"[repair] passed bug_id={bug_id} pr_url={pr_url}", flush=True)
+                    ui.pr_created(pr_url)
                     return RepairRunResult(True, "passed", "repair succeeded", task=task, last_result=test_result, prompt_template=prompt_template, history=history)
 
                 tool = self.registry.get(tool_name.lower()) or self.registry.get(tool_name)
@@ -340,7 +342,7 @@ class RepairAgent:
                     self._append_session_tool_call(session, action, last_result)
                     self._save_session(bug_id, session)
                     self._notify_whitelist_denial(bug_event, session, denied_entry)
-                    print(f"[repair] denied tool={tool.spec.name} reason={reason}", flush=True)
+                    ui.denied(tool.spec.name, reason)
                     self._append_tool_result_message(llm_messages, action, last_result)
                     continue
 
@@ -351,13 +353,16 @@ class RepairAgent:
                 self._append_session_tool_call(session, action, result)
                 self._save_session(bug_id, session)
                 self._append_tool_result_message(llm_messages, action, result)
-                print(f"[repair] tool={tool.spec.name} success={result.success} exit_code={result.exit_code}", flush=True)
+                if result.success:
+                    ui.success(f"{tool.spec.name}  exit_code={result.exit_code}")
+                else:
+                    ui.error(f"{tool.spec.name}  exit_code={result.exit_code}")
                 if tool.spec.name == "edit_code" and result.success and self._is_valid_patch(result, session):
                     modified = True
                 elif tool.spec.name == "edit_code" and result.success:
                     session["last_error"] = {"tool": "edit_code", "error": "invalid patch target"}
                     self._save_session(bug_id, session)
-                    print("[repair] invalid patch target", flush=True)
+                    ui.warning("Invalid patch target")
 
                 # 继续在当前轮次中等待 finish_patch，直到进入编译/测试阶段。
                 continue
@@ -367,7 +372,7 @@ class RepairAgent:
 
         self.task_manager.update_status(bug_id, TaskStatus.FAILED)
         self._send_feishu_help(bug_event, session, last_result)
-        print(f"[repair] failed bug_id={bug_id} message=auto repair exhausted", flush=True)
+        ui.error(f"Auto repair exhausted  bug_id={bug_id}")
         return RepairRunResult(False, "failed", "auto repair exhausted", task=task, last_result=last_result, prompt_template=prompt_template, history=history)
 
     def _prepare_tool_arguments(self, tool_name: str, raw_arguments: Any, bug_event: BugEvent) -> dict[str, Any]:
@@ -441,7 +446,7 @@ class RepairAgent:
         response = self.llm_client.chat(messages, tools=self._openai_tools(), tool_choice="auto")
         artifact_path = response.data.get("artifact_path") if isinstance(response.data, dict) else ""
         if artifact_path:
-            print(f"[repair] llm_call saved={artifact_path}", flush=True)
+            ui.info(f"LLM call saved → {artifact_path}")
         if not response.success:
             return self._invalid_llm_action(f"llm call failed: {response.stderr_summary}")
         tool_calls = response.data.get("tool_calls") if isinstance(response.data, dict) else None
@@ -833,7 +838,7 @@ class RepairAgent:
         if errors:
             summary_parts.append(f"{len(errors)} error(s)")
 
-        print(f"[repair] rollback bug_id={bug_event.bug_id} restored={restored} removed={removed} errors={errors}", flush=True)
+        ui.rollback(len(restored), len(removed))
 
         return ToolResult(
             tool="rollback",
@@ -949,7 +954,10 @@ class RepairAgent:
         session["feishu_review_payload"] = payload
         session["feishu_review_result"] = result.model_dump()
         self._save_session(bug_event.bug_id, session)
-        print(f"[repair] feishu review success={result.success} dry_run={result.data.get('dry_run')}", flush=True)
+        if result.success:
+            ui.info(f"Feishu review notification sent  dry_run={result.data.get('dry_run')}")
+        else:
+            ui.warning(f"Feishu review notification failed  dry_run={result.data.get('dry_run')}")
         return result
 
     def _send_feishu_help(self, bug_event: BugEvent, session: dict[str, Any], last_result: ToolResult | None) -> ToolResult:
@@ -968,7 +976,10 @@ class RepairAgent:
         session["feishu_help_payload"] = payload
         session["feishu_help_result"] = result.model_dump()
         self._save_session(bug_event.bug_id, session)
-        print(f"[repair] feishu help success={result.success} dry_run={result.data.get('dry_run')}", flush=True)
+        if result.success:
+            ui.info(f"Feishu help notification sent  dry_run={result.data.get('dry_run')}")
+        else:
+            ui.warning(f"Feishu help notification failed  dry_run={result.data.get('dry_run')}")
         return result
 
     def _notify_whitelist_denial(self, bug_event: BugEvent, session: dict[str, Any], denied_entry: dict[str, Any]) -> ToolResult:
@@ -999,7 +1010,7 @@ class RepairAgent:
         session["denial_notifications"] = notifications
         session["last_denial_result"] = result.model_dump()
         self._save_session(bug_event.bug_id, session)
-        print(f"[repair] whitelist denial notified success={result.success}", flush=True)
+        ui.info(f"Whitelist denial notified  success={result.success}")
         return result
 
     def _run_feishu_tool(self, payload: dict[str, Any]) -> ToolResult:

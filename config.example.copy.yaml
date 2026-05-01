@@ -5,6 +5,7 @@ project:
   root: .
   language: java
   default_branch: master
+  lint_command: ""  # 示例: "javac -Xlint:all -d /tmp/auto-fix-lint {file}"
 llm:
   base_url: https://api.openai.com/v1
   api_key: your-api-key

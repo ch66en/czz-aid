@@ -146,3 +146,110 @@ def test_edit_code_records_file_existed_false_for_new_file(tmp_path):
     assert result.success is True
     assert result.data["original_content"] == ""
     assert result.data["file_existed"] is False
+
+
+def test_edit_code_skips_lint_when_not_configured(tmp_path):
+    """未配置 lint_command 时，编辑成功且 lint_passed 为 None。"""
+    path = tmp_path / "Demo.java"
+    path.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
+    config = AppConfig()
+    config.project.lint_command = ""
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is True
+    assert result.data["lint_passed"] is None
+    assert result.data["lint_output"] == ""
+
+
+def test_edit_code_succeeds_when_lint_passes(tmp_path):
+    """lint 通过时编辑成功，lint_passed 为 True。"""
+    path = tmp_path / "Demo.java"
+    path.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(tmp_path)
+    config.project.lint_command = "python -c \"print('ok')\""
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is True
+    assert result.data["lint_passed"] is True
+    assert "ok" in result.data["lint_output"]
+
+
+def test_edit_code_reverts_file_when_lint_fails(tmp_path):
+    """lint 失败时应恢复原文件内容并返回失败。"""
+    path = tmp_path / "Demo.java"
+    original = "class Demo { int x = 1; }\n"
+    path.write_text(original, encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(tmp_path)
+    config.project.lint_command = "python -c \"import sys; sys.exit(1)\""
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is False
+    assert "lint failed" in result.stderr_summary
+    assert result.data["lint_passed"] is False
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_edit_code_reverts_new_file_when_lint_fails(tmp_path):
+    """新建文件 lint 失败时应删除该文件。"""
+    path = tmp_path / "New.java"
+    config = AppConfig()
+    config.project.root = str(tmp_path)
+    config.project.lint_command = "python -c \"import sys; sys.exit(1)\""
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- /dev/null\n+++ b/New.java\n@@\n+class New {}",
+        }
+    )
+
+    assert result.success is False
+    assert "lint failed" in result.stderr_summary
+    assert path.read_text(encoding="utf-8") == ""
+
+
+def test_edit_code_handles_missing_lint_command(tmp_path):
+    """lint 命令不存在时应恢复文件并返回失败。"""
+    path = tmp_path / "Demo.java"
+    original = "class Demo { int x = 1; }\n"
+    path.write_text(original, encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(tmp_path)
+    config.project.lint_command = "nonexistent_lint_tool_12345"
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is False
+    assert "lint failed" in result.stderr_summary
+    assert "not found" in result.data["lint_output"]
+    assert path.read_text(encoding="utf-8") == original
