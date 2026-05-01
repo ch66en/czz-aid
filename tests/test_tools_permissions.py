@@ -76,3 +76,15 @@ def test_run_command_requires_whitelist_and_blocks_dangerous_commands() -> None:
     allowed, reason = guard.can_execute(tool.spec, context, {"command": "curl https://example.com"})
     assert allowed is False
     assert reason == "command not in whitelist"
+
+
+def test_run_command_denial_can_be_detected_for_review() -> None:
+    """白名单拒绝时应返回可供审查的明确原因。"""
+    guard = PermissionGuard()
+    tool = RunCommandTool()
+    context = ToolContext(permission_mode={PermissionType.TEST_EXECUTION}, allowed_commands=["mvn"])
+
+    allowed, reason = guard.can_execute(tool.spec, context, {"command": "git status"})
+
+    assert allowed is False
+    assert reason == "command not in whitelist"

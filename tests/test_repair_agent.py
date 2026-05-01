@@ -363,6 +363,27 @@ def test_repair_agent_sends_feishu_help_on_failure() -> None:
     assert session_store.get("feishu_help:BUG-H")["feishu_result"]["success"] is True
 
 
+def test_repair_agent_notifies_whitelist_denied_commands() -> None:
+    config = AppConfig()
+    registry = ToolRegistry()
+    feishu = RecordingFeishuTool()
+    registry.register(feishu)
+    session_store = SessionStore()
+    agent = RepairAgent(config, registry, PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), session_store, SkillStore())
+    bug_event = BugEvent(bug_id="BUG-D", source="log", project="demo", title="NPE", exception_type="NullPointerException", message="x", top_business_frame="Demo.java:1", fingerprint="fp")
+
+    result = agent._notify_whitelist_denial(
+        bug_event,
+        {},
+        {"tool": "run_command", "reason": "command not in whitelist", "arguments": {"command": "curl https://example.com"}},
+    )
+
+    assert result.success is True
+    assert feishu.payloads[0]["action"] == "send_help_card"
+    assert "whitelist denied" in feishu.payloads[0]["args"]["last_result"]["stderr_summary"]
+    assert session_store.get("whitelist_denied:BUG-D")["denied_entry"]["tool"] == "run_command"
+
+
 def test_repair_agent_sends_feishu_review_request() -> None:
     config = AppConfig()
     registry = ToolRegistry()

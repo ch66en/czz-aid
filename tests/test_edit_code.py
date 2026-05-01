@@ -110,3 +110,39 @@ def test_edit_code_resolves_relative_path_from_project_root(tmp_path):
     assert result.success is True
     assert result.data["path"] == str(source)
     assert source.read_text(encoding="utf-8") == "class Demo { int x = 2; }\n"
+
+
+def test_edit_code_records_original_content_and_file_existed(tmp_path):
+    """编辑成功时应在 data 中记录原文件内容和文件是否已存在。"""
+    path = tmp_path / "Demo.java"
+    original = "class Demo { int x = 1; }\n"
+    path.write_text(original, encoding="utf-8")
+    tool = EditCodeTool()
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is True
+    assert result.data["original_content"] == original
+    assert result.data["file_existed"] is True
+
+
+def test_edit_code_records_file_existed_false_for_new_file(tmp_path):
+    """新建文件时 file_existed 应为 False，original_content 为空字符串。"""
+    path = tmp_path / "New.java"
+    tool = EditCodeTool()
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- /dev/null\n+++ b/New.java\n@@\n+class New {}",
+        }
+    )
+
+    assert result.success is True
+    assert result.data["original_content"] == ""
+    assert result.data["file_existed"] is False

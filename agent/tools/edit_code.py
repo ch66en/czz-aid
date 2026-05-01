@@ -64,6 +64,7 @@ class EditCodeTool(BaseTool):
 
         path.parent.mkdir(parents=True, exist_ok=True)
         original = path.read_text(encoding="utf-8") if path.exists() else ""
+        file_existed = path.exists()
         try:
             patched = self._apply_simple_unified_diff(original, content)
         except ValueError as exc:
@@ -72,7 +73,11 @@ class EditCodeTool(BaseTool):
             return ToolResult(tool="edit_code", success=False, exit_code=1, stdout_summary=str(path), stderr_summary="patch did not change file", data={"path": str(path)}, artifacts=[str(path)])
         path.write_text(patched, encoding="utf-8")
 
-        return ToolResult(tool="edit_code", success=True, exit_code=0, stdout_summary=str(path), stderr_summary="", data={"path": str(path)}, artifacts=[str(path)])
+        return ToolResult(
+            tool="edit_code", success=True, exit_code=0, stdout_summary=str(path), stderr_summary="",
+            data={"path": str(path), "original_content": original, "file_existed": file_existed},
+            artifacts=[str(path)],
+        )
 
     def _looks_like_unified_diff(self, content: str) -> bool:
         text = content.lstrip()

@@ -254,6 +254,10 @@ class RepairAgent:
                     self._save_session(bug_id, session)
                     print(f"[repair] compile success={compile_result.success} exit_code={compile_result.exit_code}", flush=True)
                     if not compile_result.success:
+                        rollback_result = self._rollback_git_changes(history, bug_event)
+                        history.append({"tool": "Rollback", "result": rollback_result.model_dump()})
+                        session["rollback_result"] = rollback_result.model_dump()
+                        self._save_session(bug_id, session)
                         last_result = compile_result
                         break
                     test_result = self._run_test()
@@ -262,6 +266,10 @@ class RepairAgent:
                     self._save_session(bug_id, session)
                     print(f"[repair] test success={test_result.success} exit_code={test_result.exit_code}", flush=True)
                     if not test_result.success:
+                        rollback_result = self._rollback_git_changes(history, bug_event)
+                        history.append({"tool": "Rollback", "result": rollback_result.model_dump()})
+                        session["rollback_result"] = rollback_result.model_dump()
+                        self._save_session(bug_id, session)
                         last_result = test_result
                         break
                     pr_result = self._create_pr(task, bug_event, history)
@@ -315,11 +323,23 @@ class RepairAgent:
                 action["arguments"] = arguments
                 allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), arguments)
                 if not allowed:
-                    last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={}, artifacts=[])
+                    last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={"arguments": arguments, "tool": tool.spec.name}, artifacts=[])
                     history.append({"tool": tool.spec.name, "result": last_result.model_dump()})
                     session["last_error"] = last_result.model_dump()
+                    denied_commands = session.get("denied_commands", [])
+                    if not isinstance(denied_commands, list):
+                        denied_commands = []
+                    denied_entry = {
+                        "tool": tool.spec.name,
+                        "reason": reason,
+                        "arguments": arguments,
+                        "action": action,
+                    }
+                    denied_commands.append(denied_entry)
+                    session["denied_commands"] = denied_commands
                     self._append_session_tool_call(session, action, last_result)
                     self._save_session(bug_id, session)
+                    self._notify_whitelist_denial(bug_event, session, denied_entry)
                     print(f"[repair] denied tool={tool.spec.name} reason={reason}", flush=True)
                     self._append_tool_result_message(llm_messages, action, last_result)
                     continue
@@ -759,6 +779,72 @@ class RepairAgent:
     def _run_git(self, cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, check=False)
 
+    def _is_git_tracked(self, file_path: Path, project_root: Path) -> bool:
+        """检查文件是否已被 Git 跟踪。"""
+        try:
+            relative = file_path.resolve().relative_to(project_root.resolve())
+        except ValueError:
+            return False
+        result = self._run_git(project_root, ["git", "ls-files", "--error-unmatch", str(relative)])
+        return result.returncode == 0
+
+    def _rollback_git_changes(self, history: list[dict[str, Any]], bug_event: BugEvent) -> ToolResult:
+        """回滚本轮所有编辑：已跟踪文件用 git restore 恢复，未跟踪的新文件直接删除。"""
+        project_root = Path(self.config.project.root).resolve()
+        edited_paths = self._edited_paths_from_history(history, project_root)
+        if not edited_paths:
+            return ToolResult(tool="rollback", success=True, exit_code=0, stdout_summary="no files to rollback", stderr_summary="", data={}, artifacts=[])
+
+        tracked: list[str] = []
+        untracked: list[str] = []
+        restored: list[str] = []
+        removed: list[str] = []
+        errors: list[str] = []
+
+        for path in edited_paths:
+            relative = str(path.resolve().relative_to(project_root))
+            if self._is_git_tracked(path, project_root):
+                tracked.append(relative)
+            else:
+                untracked.append(relative)
+
+        if tracked:
+            result = self._run_git(project_root, ["git", "restore", *tracked])
+            if result.returncode == 0:
+                restored.extend(tracked)
+            else:
+                errors.append(f"git restore failed: {(result.stderr or '').strip()}")
+
+        for rel in untracked:
+            try:
+                target = project_root / rel
+                if target.exists():
+                    target.unlink()
+                    removed.append(rel)
+            except OSError as exc:
+                errors.append(f"remove {rel} failed: {exc}")
+
+        success = not errors
+        summary_parts: list[str] = []
+        if restored:
+            summary_parts.append(f"restored {len(restored)} tracked file(s)")
+        if removed:
+            summary_parts.append(f"removed {len(removed)} untracked file(s)")
+        if errors:
+            summary_parts.append(f"{len(errors)} error(s)")
+
+        print(f"[repair] rollback bug_id={bug_event.bug_id} restored={restored} removed={removed} errors={errors}", flush=True)
+
+        return ToolResult(
+            tool="rollback",
+            success=success,
+            exit_code=0 if success else 1,
+            stdout_summary="; ".join(summary_parts) or "nothing to rollback",
+            stderr_summary="; ".join(errors),
+            data={"tracked": tracked, "untracked": untracked, "restored": restored, "removed": removed, "errors": errors},
+            artifacts=[str(p) for p in edited_paths],
+        )
+
     def _edited_paths_from_history(self, history: list[dict[str, Any]], project_root: Path) -> list[Path]:
         paths: list[Path] = []
         for item in history:
@@ -883,6 +969,37 @@ class RepairAgent:
         session["feishu_help_result"] = result.model_dump()
         self._save_session(bug_event.bug_id, session)
         print(f"[repair] feishu help success={result.success} dry_run={result.data.get('dry_run')}", flush=True)
+        return result
+
+    def _notify_whitelist_denial(self, bug_event: BugEvent, session: dict[str, Any], denied_entry: dict[str, Any]) -> ToolResult:
+        """发送白名单拒绝通知，方便人工后续加入白名单。"""
+        payload = {
+            "action": "send_help_card",
+            "args": {
+                "bug": bug_event.model_dump(mode="json"),
+                "last_result": {
+                    "tool": denied_entry.get("tool", ""),
+                    "success": False,
+                    "exit_code": 1,
+                    "stdout_summary": "",
+                    "stderr_summary": f"whitelist denied: {denied_entry.get('reason', '')}",
+                    "data": denied_entry,
+                },
+                "session_path": bug_event.bug_id,
+                "session": session,
+            },
+        }
+        result = self._run_feishu_tool(payload)
+        record = {"bug": bug_event.model_dump(mode="json"), "denied_entry": denied_entry, "session": session, "feishu_result": result.model_dump()}
+        self.session_store.put(f"whitelist_denied:{bug_event.bug_id}", record)
+        notifications = session.get("denial_notifications", [])
+        if not isinstance(notifications, list):
+            notifications = []
+        notifications.append(record)
+        session["denial_notifications"] = notifications
+        session["last_denial_result"] = result.model_dump()
+        self._save_session(bug_event.bug_id, session)
+        print(f"[repair] whitelist denial notified success={result.success}", flush=True)
         return result
 
     def _run_feishu_tool(self, payload: dict[str, Any]) -> ToolResult:
