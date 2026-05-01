@@ -9,16 +9,16 @@ project:
   # lint_command: "javac -Xlint:all -d /tmp/auto-fix-lint {file}"
 llm:
   base_url: https://token-plan-cn.xiaomimimo.com/v1
-  api_key: tp-ccu9ew24g4nag88sb7r5tr74t1vkvxzyruvmwc5xc60chs85
+  api_key: 
   model: mimo-v2.5-pro
   timeout_seconds: 60
 gitee:
   base_url: https://gitee.com/api/v5
-  token: 0550864d151471528e9f91af6fc92087
+  token: 
   owner: ch6enle
   repo: mall-service
 feishu:
-  webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/9f3d6b63-d84d-44c2-8126-3412e1bb6a66"
+  webhook: ""
   app_id: "cli_a97ac50d0c3b5cdd"
   app_secret: ""
   approval_chat_id: "6666"
