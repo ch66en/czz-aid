@@ -200,8 +200,12 @@ class RepairAgent:
             invalid_output_retries = 0
             finish_without_patch_rejections = 0
             while True:
-                ui.thinking("Waiting for LLM response")
-                action = self._ask_llm(llm_messages, history, bug_event, session)
+                spinner = ui.Spinner("Thinking")
+                spinner.start()
+                try:
+                    action = self._ask_llm(llm_messages, history, bug_event, session)
+                finally:
+                    spinner.stop()
                 history.append(action)
                 tool_name = str(action.get("tool", ""))
                 ui.tool_call(tool_name or "unknown", action.get("reason", ""))

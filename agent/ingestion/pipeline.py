@@ -13,6 +13,7 @@ from agent.ingestion.sanitizer import Sanitizer
 from agent.ingestion.traceback_parser import ParsedTraceback, TracebackParser
 from agent.models import BugEvent
 from agent.storage.session_store import SessionStore
+import agent.ui as ui
 
 
 @dataclass(slots=True)
@@ -78,11 +79,7 @@ class IngestionPipeline:
         bug_event_dict["frame_contexts"] = frame_contexts
         bug_event = BugEvent.model_validate(bug_event_dict)
         duplicate = self.dedup_engine.is_duplicate(bug_event.fingerprint)
-        print(
-            f"[pipeline] bug_id={bug_id} exception={bug_event.exception_type} "
-            f"frames={len(parsed.frames)} duplicate={duplicate}",
-            flush=True,
-        )
+        ui.pipeline_bug(bug_id, bug_event.exception_type, len(parsed.frames), duplicate)
         if not duplicate:
             self._save_bug_event(bug_event, frame_contexts)
             self.dedup_engine.mark_seen(bug_event.fingerprint)
@@ -92,17 +89,13 @@ class IngestionPipeline:
             self.session_store.put(bug_id, session_snapshot)
         repair_result = None
         if self.repair_agent is not None and not duplicate and parsed.frames:
-            print(f"[pipeline] starting repair bug_id={bug_id}", flush=True)
+            ui.pipeline_repair_start(bug_id)
             repair_result = self.repair_agent.repair(bug_id)
-            print(
-                f"[pipeline] repair finished bug_id={bug_id} "
-                f"status={repair_result.status} success={repair_result.success}",
-                flush=True,
-            )
+            ui.pipeline_repair_finished(bug_id, repair_result.status, repair_result.success)
         elif not parsed.frames:
-            print(f"[pipeline] skip repair bug_id={bug_id} reason=no parsed frames", flush=True)
+            ui.pipeline_skip(bug_id, "no parsed frames")
         elif duplicate:
-            print(f"[pipeline] skip duplicate bug_id={bug_id}", flush=True)
+            ui.pipeline_skip(bug_id, "duplicate")
         return PipelineResult(
             bug_event=bug_event,
             parsed_traceback=parsed,
@@ -119,10 +112,10 @@ class IngestionPipeline:
             try:
                 path = self._resolve_source_path(frame.file_path)
                 if self.verbose:
-                    print(f"[frame-context] frame={frame.file_path}:{frame.line_number} candidate_path={path}")
+                    ui.info(f"[frame-context] frame={frame.file_path}:{frame.line_number} candidate_path={path}")
                 if path is None or not path.exists():
                     if self.verbose:
-                        print(f"[frame-context] skip missing source for {frame.file_path}:{frame.line_number}")
+                        ui.warning(f"[frame-context] skip missing source for {frame.file_path}:{frame.line_number}")
                     continue
                 symbol_at = self.ast_extractor.find_symbol_at(str(path), frame.line_number)
                 symbol = symbol_at["symbol"]
@@ -140,7 +133,7 @@ class IngestionPipeline:
                 )
             except Exception as exc:
                 if self.verbose:
-                    print(f"[frame-context] failed for {frame.file_path}:{frame.line_number} error={exc}")
+                    ui.error(f"[frame-context] failed for {frame.file_path}:{frame.line_number} error={exc}")
                 continue
         return contexts
 

@@ -61,13 +61,30 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     info(f"env={config.env}  workspace={config.workspace}")
     info(f"project={config.project.name}  language={config.project.language}")
+
+    # ── 启动自检 ──────────────────────────────────────────
+    missing: list[str] = []
+    if not config.llm.api_key.strip() or config.llm.api_key.strip() in ("", "your-api-key"):
+        missing.append("llm.api_key")
+    if not config.gitee.token.strip() or config.gitee.token.strip() in ("", "your-gitee-token"):
+        missing.append("gitee.token")
+    if missing:
+        from agent.ui import warning as ui_warning
+        ui_warning(f"Missing config: {', '.join(missing)}")
+    else:
+        from agent.ui import success as ui_success
+        ui_success("Self-check passed")
     print()
 
     registry = ToolRegistry()
     permission_guard = PermissionGuard()
     task_store = TaskStore()
     session_store = SessionStore()
-    skill_store = SkillStore()
+    skills_dir = Path(config.workspace) / "skills"
+    skill_store = SkillStore(skills_dir=skills_dir)
+    loaded_skills = skill_store.load_from_disk()
+    if loaded_skills:
+        info(f"Loaded {loaded_skills} skill(s) from {skills_dir}")
     task_manager = TaskManager(task_store=task_store)
     llm_client = OpenAICompatibleClient(config=config) if config.llm.api_key.strip() else None
     if llm_client is not None:

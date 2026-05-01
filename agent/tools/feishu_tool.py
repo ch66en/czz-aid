@@ -148,7 +148,7 @@ class FeishuTool(BaseTool):
 
     def _build_skill_created_message(self, args: dict[str, Any]) -> str:
         return (
-            "Review 反思已完成，skill 已生成。\n"
+            "Skill 已生成并上传至云端共享，团队成员可直接复用。\n"
             f"Bug ID：{args.get('bug_id', 'unknown')}\n"
             f"Skill：{args.get('skill_name', '')}\n"
             f"路径：{args.get('skill_path', '')}"
@@ -203,8 +203,9 @@ class FeishuTool(BaseTool):
             ("Bug ID", args.get("bug_id", "unknown")),
             ("Skill", args.get("skill_name", "")),
             ("路径", args.get("skill_path", "")),
+            ("状态", "已上传至云端共享"),
         ]
-        return self._interactive_card(title="Skill 已生成", color="blue", message=message, fields=fields, actions=[])
+        return self._interactive_card(title="Skill 已上传至云端共享", color="blue", message=message, fields=fields, actions=[])
 
     def _interactive_card(self, *, title: str, color: str, message: str, fields: list[tuple[str, Any]], actions: list[dict[str, Any]]) -> dict[str, Any]:
         elements: list[dict[str, Any]] = [

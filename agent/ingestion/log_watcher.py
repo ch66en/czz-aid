@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import agent.ui as ui
+
 
 _TRACE_START_PATTERN = re.compile(
     r'(?:Exception in thread "[^"]+"\s+)?'
@@ -68,7 +70,7 @@ class LogWatcher:
     def watch(self, max_iterations: int | None = None) -> str:
         """Continuously scan watched paths until interrupted."""
         message = f"watching {len(self.paths)} path(s)"
-        print(message, flush=True)
+        ui.info(message)
         if self.pipeline is None and max_iterations is None:
             return message
         iterations = 0
@@ -126,7 +128,7 @@ class LogWatcher:
 
         state = self._state_for(path, size, mtime_ns)
         if self._was_rewritten(path, state, size, mtime_ns):
-            print(f"[watch] detected rewritten log: {path}", flush=True)
+            ui.warning(f"Detected rewritten log: {path}")
             state.offset = 0
             state.partial_line = ""
             state.pending_lines.clear()
@@ -239,7 +241,7 @@ class LogWatcher:
 
         exception_type = self._exception_type(clean_traceback)
         bug_id = self._bug_id(path, clean_traceback)
-        print(f"[watch] detected {exception_type} bug_id={bug_id} source={path}", flush=True)
+        ui.watch_detected(exception_type, bug_id, str(path))
         result = self.pipeline.process(
             raw_text=clean_traceback,
             bug_id=bug_id,
@@ -254,22 +256,14 @@ class LogWatcher:
     def _print_pipeline_result(self, result: Any) -> None:
         repair_result = getattr(result, "repair_result", None)
         if repair_result is None:
-            print("[watch] pipeline finished without repair result", flush=True)
+            ui.watch_no_result()
             return
-        print(
-            f"[watch] repair status={repair_result.status} success={repair_result.success} "
-            f"message={repair_result.message}",
-            flush=True,
-        )
+        ui.watch_result(repair_result.status, repair_result.success, repair_result.message)
         last_result = getattr(repair_result, "last_result", None)
         if last_result is not None:
-            print(
-                f"[watch] last tool={last_result.tool} success={last_result.success} "
-                f"exit_code={last_result.exit_code}",
-                flush=True,
-            )
+            ui.watch_last_tool(last_result.tool, last_result.success, last_result.exit_code)
             if last_result.stderr_summary:
-                print(f"[watch] last error={last_result.stderr_summary}", flush=True)
+                ui.watch_last_error(last_result.stderr_summary)
 
     def _clean_start_line(self, line: str) -> str:
         stripped = line.strip()
