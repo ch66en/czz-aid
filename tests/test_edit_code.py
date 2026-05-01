@@ -1,5 +1,15 @@
-from agent.tools.edit_code import EditCodeTool
 from agent.config import AppConfig
+from agent.tools.edit_code import EditCodeTool
+
+
+def _configured_tool_with_source(tmp_path, name="Demo.java", content="class Demo { int x = 1; }\n"):
+    project_root = tmp_path / "project"
+    source = project_root / "src" / "main" / "java" / name
+    source.parent.mkdir(parents=True)
+    source.write_text(content, encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(project_root)
+    return EditCodeTool(config), source, config
 
 
 def test_edit_code_applies_hunk_with_different_add_remove_counts(tmp_path):
@@ -88,13 +98,7 @@ def test_edit_code_fails_when_diff_context_does_not_match(tmp_path):
 
 
 def test_edit_code_resolves_relative_path_from_project_root(tmp_path):
-    project_root = tmp_path / "project"
-    source = project_root / "src" / "main" / "java" / "Demo.java"
-    source.parent.mkdir(parents=True)
-    source.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
-    config = AppConfig()
-    config.project.root = str(project_root)
-    tool = EditCodeTool(config)
+    tool, source, _config = _configured_tool_with_source(tmp_path)
 
     result = tool.run(
         {
@@ -113,7 +117,6 @@ def test_edit_code_resolves_relative_path_from_project_root(tmp_path):
 
 
 def test_edit_code_records_original_content_and_file_existed(tmp_path):
-    """编辑成功时应在 data 中记录原文件内容和文件是否已存在。"""
     path = tmp_path / "Demo.java"
     original = "class Demo { int x = 1; }\n"
     path.write_text(original, encoding="utf-8")
@@ -131,8 +134,7 @@ def test_edit_code_records_original_content_and_file_existed(tmp_path):
     assert result.data["file_existed"] is True
 
 
-def test_edit_code_records_file_existed_false_for_new_file(tmp_path):
-    """新建文件时 file_existed 应为 False，original_content 为空字符串。"""
+def test_edit_code_records_file_existed_false_for_new_file_without_config(tmp_path):
     path = tmp_path / "New.java"
     tool = EditCodeTool()
 
@@ -149,17 +151,13 @@ def test_edit_code_records_file_existed_false_for_new_file(tmp_path):
 
 
 def test_edit_code_skips_lint_when_not_configured(tmp_path):
-    """未配置 lint_command 时，编辑成功且 lint_passed 为 None。"""
-    path = tmp_path / "Demo.java"
-    path.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
-    config = AppConfig()
+    tool, path, config = _configured_tool_with_source(tmp_path)
     config.project.lint_command = ""
-    tool = EditCodeTool(config)
 
     result = tool.run(
         {
             "path": str(path),
-            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+            "content": "--- a/src/main/java/Demo.java\n+++ b/src/main/java/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
         }
     )
 
@@ -169,18 +167,13 @@ def test_edit_code_skips_lint_when_not_configured(tmp_path):
 
 
 def test_edit_code_succeeds_when_lint_passes(tmp_path):
-    """lint 通过时编辑成功，lint_passed 为 True。"""
-    path = tmp_path / "Demo.java"
-    path.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
-    config = AppConfig()
-    config.project.root = str(tmp_path)
+    tool, path, config = _configured_tool_with_source(tmp_path)
     config.project.lint_command = "python -c \"print('ok')\""
-    tool = EditCodeTool(config)
 
     result = tool.run(
         {
             "path": str(path),
-            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+            "content": "--- a/src/main/java/Demo.java\n+++ b/src/main/java/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
         }
     )
 
@@ -190,19 +183,14 @@ def test_edit_code_succeeds_when_lint_passes(tmp_path):
 
 
 def test_edit_code_reverts_file_when_lint_fails(tmp_path):
-    """lint 失败时应恢复原文件内容并返回失败。"""
-    path = tmp_path / "Demo.java"
     original = "class Demo { int x = 1; }\n"
-    path.write_text(original, encoding="utf-8")
-    config = AppConfig()
-    config.project.root = str(tmp_path)
+    tool, path, config = _configured_tool_with_source(tmp_path, content=original)
     config.project.lint_command = "python -c \"import sys; sys.exit(1)\""
-    tool = EditCodeTool(config)
 
     result = tool.run(
         {
             "path": str(path),
-            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+            "content": "--- a/src/main/java/Demo.java\n+++ b/src/main/java/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
         }
     )
 
@@ -212,44 +200,114 @@ def test_edit_code_reverts_file_when_lint_fails(tmp_path):
     assert path.read_text(encoding="utf-8") == original
 
 
-def test_edit_code_reverts_new_file_when_lint_fails(tmp_path):
-    """新建文件 lint 失败时应删除该文件。"""
-    path = tmp_path / "New.java"
+def test_edit_code_rejects_new_file_when_configured(tmp_path):
+    path = tmp_path / "project" / "src" / "main" / "java" / "New.java"
     config = AppConfig()
-    config.project.root = str(tmp_path)
+    config.project.root = str(tmp_path / "project")
     config.project.lint_command = "python -c \"import sys; sys.exit(1)\""
     tool = EditCodeTool(config)
 
     result = tool.run(
         {
             "path": str(path),
-            "content": "--- /dev/null\n+++ b/New.java\n@@\n+class New {}",
+            "content": "--- /dev/null\n+++ b/src/main/java/New.java\n@@\n+class New {}",
         }
     )
 
     assert result.success is False
-    assert "lint failed" in result.stderr_summary
-    assert path.read_text(encoding="utf-8") == ""
+    assert "new files are not allowed" in result.stderr_summary
+    assert path.exists() is False
 
 
 def test_edit_code_handles_missing_lint_command(tmp_path):
-    """lint 命令不存在时应恢复文件并返回失败。"""
-    path = tmp_path / "Demo.java"
     original = "class Demo { int x = 1; }\n"
-    path.write_text(original, encoding="utf-8")
-    config = AppConfig()
-    config.project.root = str(tmp_path)
+    tool, path, config = _configured_tool_with_source(tmp_path, content=original)
     config.project.lint_command = "nonexistent_lint_tool_12345"
-    tool = EditCodeTool(config)
 
     result = tool.run(
         {
             "path": str(path),
-            "content": "--- a/Demo.java\n+++ b/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+            "content": "--- a/src/main/java/Demo.java\n+++ b/src/main/java/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
         }
     )
 
     assert result.success is False
     assert "lint failed" in result.stderr_summary
     assert "not found" in result.data["lint_output"]
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_edit_code_rejects_configured_path_outside_project_root(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside" / "Demo.java"
+    outside.parent.mkdir()
+    outside.write_text("class Demo { int x = 1; }\n", encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(project_root)
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": str(outside),
+            "content": "--- a/src/main/java/Demo.java\n+++ b/src/main/java/Demo.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is False
+    assert result.stderr_summary == "path is outside project root"
+    assert outside.read_text(encoding="utf-8") == "class Demo { int x = 1; }\n"
+
+
+def test_edit_code_rejects_config_files_even_inside_project(tmp_path):
+    project_root = tmp_path / "project"
+    config_file = project_root / "src" / "main" / "java" / "application.yaml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("debug: true\n", encoding="utf-8")
+    config = AppConfig()
+    config.project.root = str(project_root)
+    tool = EditCodeTool(config)
+
+    result = tool.run(
+        {
+            "path": str(config_file),
+            "content": "--- a/src/main/java/application.yaml\n+++ b/src/main/java/application.yaml\n@@\n-debug: true\n+debug: false",
+        }
+    )
+
+    assert result.success is False
+    assert "Java source files" in result.stderr_summary
+    assert config_file.read_text(encoding="utf-8") == "debug: true\n"
+
+
+def test_edit_code_rejects_diff_header_mismatch(tmp_path):
+    tool, path, _config = _configured_tool_with_source(tmp_path)
+
+    result = tool.run(
+        {
+            "path": str(path),
+            "content": "--- a/src/main/java/Other.java\n+++ b/src/main/java/Other.java\n@@\n-class Demo { int x = 1; }\n+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is False
+    assert result.stderr_summary == "diff header path does not match target path"
+    assert path.read_text(encoding="utf-8") == "class Demo { int x = 1; }\n"
+
+
+def test_edit_code_rejects_large_patch(tmp_path):
+    original = "".join(f"class Line{i} {{}}\n" for i in range(60))
+    tool, path, _config = _configured_tool_with_source(tmp_path, content=original)
+    diff = (
+        "--- a/src/main/java/Demo.java\n"
+        "+++ b/src/main/java/Demo.java\n"
+        "@@\n"
+        + "".join(f"-class Line{i} {{}}\n" for i in range(60))
+        + "".join(f"+class NewLine{i} {{}}\n" for i in range(60))
+    )
+
+    result = tool.run({"path": str(path), "content": diff})
+
+    assert result.success is False
+    assert "adds too many lines" in result.stderr_summary or "deletes too many lines" in result.stderr_summary
     assert path.read_text(encoding="utf-8") == original

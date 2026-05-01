@@ -12,6 +12,7 @@ def test_load_config_returns_defaults_when_file_missing(tmp_path: Path) -> None:
 
     assert isinstance(config, AppConfig)
     assert config.project.name == "default-project"
+    assert config.project.test_command == 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
     assert config.agent.max_retry == 3
 
 

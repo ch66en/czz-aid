@@ -5,6 +5,7 @@ project:
   root: .
   language: java
   default_branch: master
+  test_command: 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
   lint_command: ""  # 示例: "javac -Xlint:all -d /tmp/auto-fix-lint {file}"
 llm:
   base_url: https://api.openai.com/v1

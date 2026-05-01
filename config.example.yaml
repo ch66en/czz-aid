@@ -5,6 +5,7 @@ project:
   root: E:\resourse\code\java\mall-service
   language: java
   default_branch: master
+  test_command: 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
   # lint_command: "javac -Xlint:all -d /tmp/auto-fix-lint {file}"
 llm:
   base_url: https://token-plan-cn.xiaomimimo.com/v1

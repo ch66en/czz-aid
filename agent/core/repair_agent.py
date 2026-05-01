@@ -14,6 +14,7 @@ import requests
 
 from agent.config import AppConfig
 from agent.core.permission_guard import PermissionGuard
+from agent.core.test_generation_agent import TestGenerationAgent
 from agent.core.task_manager import TaskManager
 from agent.core.tool_registry import ToolRegistry
 from agent.ingestion.sanitizer import Sanitizer
@@ -23,6 +24,7 @@ from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.tools.base import ToolContext
 from agent.tools.ast_symbols_tool import AstSymbolsTool
+from agent.tools.apply_test_patch import ApplyTestPatchTool
 from agent.tools.compile_tool import RunCompileTool
 from agent.tools.edit_code import EditCodeTool
 from agent.tools.feishu_tool import FeishuTool
@@ -71,6 +73,12 @@ class RepairAgent:
         self.llm_client = llm_client
         self.sanitizer = Sanitizer()
         self._ensure_core_tools()
+        apply_test_patch_tool = self.registry.get("apply_test_patch")
+        self.test_generation_agent = TestGenerationAgent(
+            config=config,
+            llm_client=llm_client,
+            apply_tool=apply_test_patch_tool if isinstance(apply_test_patch_tool, ApplyTestPatchTool) else None,
+        )
 
     def _ensure_core_tools(self) -> None:
         """确保核心工具已注册到工具注册表。"""
@@ -80,6 +88,7 @@ class RepairAgent:
             ReadCodeTool(self.config),
             SearchCodeTool(),
             EditCodeTool(self.config),
+            ApplyTestPatchTool(self.config),
             RunCommandTool(self.config),
             GitDiffTool(),
             RunCompileTool(self.config),
@@ -105,6 +114,7 @@ class RepairAgent:
                 "Use search_code for project-scoped Java keyword searches; its root is enforced by runtime.",
                 "edit_code content must be a unified diff/patch, not a full file rewrite.",
                 "After a successful edit, finish_patch triggers compile and test; do not skip them.",
+                "After a valid source edit, runtime may generate a separate regression test patch before compile/test.",
                 "Return finish_patch only after a code edit has succeeded.",
             ],
             "terminal_tools": {
@@ -197,6 +207,7 @@ class RepairAgent:
         for attempt in range(1, self.config.agent.max_retry + 1):
             ui.attempt(attempt, self.config.agent.max_retry, bug_id)
             modified = False
+            test_generated = False
             invalid_output_retries = 0
             finish_without_patch_rejections = 0
             while True:
@@ -363,6 +374,9 @@ class RepairAgent:
                     ui.error(f"{tool.spec.name}  exit_code={result.exit_code}")
                 if tool.spec.name == "edit_code" and result.success and self._is_valid_patch(result, session):
                     modified = True
+                    if not test_generated:
+                        test_generated = True
+                        self._generate_regression_test(bug_event, session, result, history, bug_id)
                 elif tool.spec.name == "edit_code" and result.success:
                     session["last_error"] = {"tool": "edit_code", "error": "invalid patch target"}
                     self._save_session(bug_id, session)
@@ -470,7 +484,7 @@ class RepairAgent:
 
     def _openai_tools(self) -> list[dict[str, Any]]:
         """Convert registered tools plus virtual terminal actions to OpenAI function tools."""
-        specs = [tool.spec for tool in self.registry.list_tools()]
+        specs = [tool.spec for tool in self.registry.list_tools() if tool.spec.name != "apply_test_patch"]
         specs.extend(self._virtual_tool_specs())
         return [self._tool_spec_to_openai_tool(spec) for spec in specs]
 
@@ -681,6 +695,40 @@ class RepairAgent:
             return ToolResult(tool="run_test", success=False, exit_code=1, stdout_summary="", stderr_summary="test tool missing", data={}, artifacts=[])
         return tool.run({})
 
+    def _generate_regression_test(
+        self,
+        bug_event: BugEvent,
+        session: dict[str, Any],
+        edit_result: ToolResult,
+        history: list[dict[str, Any]],
+        bug_id: str,
+    ) -> None:
+        """Generate a regression test patch after a successful source repair."""
+        result = self.test_generation_agent.generate_for_repair(
+            bug_event=bug_event,
+            session=session,
+            edit_result=edit_result,
+            history=history,
+        )
+        record: dict[str, Any] = {
+            "success": result.success,
+            "skipped": result.skipped,
+            "message": result.message,
+            "patch": result.patch or {},
+        }
+        if result.tool_result is not None:
+            record["tool_result"] = result.tool_result.model_dump()
+            history.append({"tool": result.tool_result.tool, "result": result.tool_result.model_dump()})
+            session["last_tool_result"] = result.tool_result.model_dump()
+        session["test_generation_result"] = record
+        self._save_session(bug_id, session)
+        if result.skipped:
+            ui.info(f"Test generation skipped  reason={result.message}")
+        elif result.success:
+            ui.success("Regression test patch generated")
+        else:
+            ui.warning(f"Regression test patch rejected  reason={result.message}")
+
     def _is_valid_patch(self, result: ToolResult, session: dict[str, Any]) -> bool:
         """判断 edit_code 是否修改了真实业务源码。"""
         path = str((result.data or {}).get("path", ""))
@@ -857,7 +905,7 @@ class RepairAgent:
     def _edited_paths_from_history(self, history: list[dict[str, Any]], project_root: Path) -> list[Path]:
         paths: list[Path] = []
         for item in history:
-            if item.get("tool") != "edit_code":
+            if item.get("tool") not in {"edit_code", "apply_test_patch"}:
                 continue
             result = item.get("result")
             if not isinstance(result, dict) or not result.get("success"):

@@ -17,7 +17,7 @@ class ProjectConfig(BaseModel):
     language: str = "java"
     default_branch: str = "main"
     compile_command: str = "mvn compile"
-    test_command: str = "mvn test"
+    test_command: str = 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
     lint_command: str = ""
     allowed_commands: list[str] = Field(default_factory=lambda: ["mvn", "git", "python", "pytest", "ruff", "java", "javac"])
 
