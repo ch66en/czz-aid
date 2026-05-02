@@ -61,6 +61,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     info(f"env={config.env}  workspace={config.workspace}")
     info(f"project={config.project.name}  language={config.project.language}")
+    info(f"llm={config.llm.provider}/{config.llm.model}")
+    if config.llm.fallback_api_key.strip():
+        fallback_provider = config.llm.fallback_provider or config.llm.provider
+        fallback_model = config.llm.fallback_model or config.llm.model
+        info(f"fallback_llm={fallback_provider}/{fallback_model}")
 
     # ── 启动自检 ──────────────────────────────────────────
     missing: list[str] = []
