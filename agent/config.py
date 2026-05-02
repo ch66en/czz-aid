@@ -30,6 +30,10 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     model: str = "gpt-5.2-codex-compatible"
     timeout_seconds: int = 60
+    fallback_provider: str = ""
+    fallback_base_url: str = ""
+    fallback_api_key: str = ""
+    fallback_model: str = ""
 
 
 class GiteeConfig(BaseModel):

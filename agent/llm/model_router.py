@@ -23,10 +23,33 @@ class ModelRouter:
     def choose_base_url(self) -> str:
         """返回当前配置中指定的 API 基础地址。"""
         provider = self.choose_provider()
+        return self._resolve_base_url(provider, self.config.llm.base_url)
+
+    def has_fallback(self) -> bool:
+        """判断是否配置了备用 LLM。"""
+        return bool(self.config.llm.fallback_api_key.strip())
+
+    def choose_fallback_provider(self) -> str:
+        """返回备用 LLM 的提供方。"""
+        return self.config.llm.fallback_provider or self.choose_provider()
+
+    def choose_fallback_model(self) -> str:
+        """返回备用 LLM 的模型名称。"""
+        return self.config.llm.fallback_model or self.choose_model()
+
+    def choose_fallback_base_url(self) -> str:
+        """返回备用 LLM 的 API 基础地址。"""
+        provider = self.choose_fallback_provider()
+        return self._resolve_base_url(provider, self.config.llm.fallback_base_url)
+
+    def _resolve_base_url(self, provider: str, configured_url: str) -> str:
+        """根据提供方和配置地址解析最终的 base URL。"""
+        if configured_url:
+            return configured_url
         if provider == "openai":
-            return self.config.llm.base_url or "https://api.openai.com/v1"
+            return "https://api.openai.com/v1"
         if provider == "deepseek":
-            return self.config.llm.base_url or "https://api.deepseek.com"
+            return "https://api.deepseek.com"
         if provider == "qwen":
-            return self.config.llm.base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        return self.config.llm.base_url or "https://ark.cn-beijing.volces.com/api/v3"
+            return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        return "https://ark.cn-beijing.volces.com/api/v3"

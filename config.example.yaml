@@ -12,6 +12,11 @@ llm:
   api_key: 
   model: mimo-v2.5-pro
   timeout_seconds: 60
+  # 备用 LLM：主 LLM 调用失败时自动切换
+  # fallback_provider: deepseek
+  # fallback_base_url: ""
+  # fallback_api_key: sk-your-fallback-key
+  # fallback_model: deepseek-chat
 gitee:
   base_url: https://gitee.com/api/v5
   token: 

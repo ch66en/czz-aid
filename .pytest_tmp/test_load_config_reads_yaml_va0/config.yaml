@@ -1,0 +1,23 @@
+env: prod
+workspace: /workspace/app
+project:
+  name: order-service
+  root: /repo/order-service
+  language: java
+  default_branch: release
+llm:
+  model: gpt-5.2-codex-compatible
+  api_key: test-key
+gitee:
+  owner: demo
+  repo: auto-fix-agent
+feishu:
+  webhook: https://open.feishu.cn/webhook
+  review_callback_mode: local
+  review_callback_port: 8765
+session:
+  root_dir: /tmp/sessions
+agent:
+  max_retry: 5
+  watch_paths:
+    - ./runtime/logs
