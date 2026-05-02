@@ -7,19 +7,53 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from agent.config import AppConfig
 from agent.models import ToolSpec
 from agent.tools.base import PermissionType, ToolContext
+
+_EDIT_FORBIDDEN_DIRS = {".git", ".github", ".gitee"}
 
 
 class PermissionGuard:
     """负责判断工具是否可以在当前阶段直接执行。"""
 
-    _FORBIDDEN_COMMAND_TOKENS = {"rm", "sudo", "chmod", "ssh", "scp", "del", "erase", "rmdir"}
+    _FORBIDDEN_COMMAND_TOKENS = {"rm", "sudo", "chmod", "ssh", "scp", "del", "erase", "rmdir", "curl", "wget", "nc", "ncat"}
     _FORBIDDEN_COMMAND_PATTERNS = [
         re.compile(r"(?:^|\s)(?:rm\s+-rf|rm\s+-fr|del\b|erase\b|rmdir\b|sudo\b|chmod\b)", re.IGNORECASE),
         re.compile(r"\|\s*(?:bash|sh|powershell|cmd\.exe)\b", re.IGNORECASE),
         re.compile(r"(?:^|\s)(?:git\s+reset\s+--hard|git\s+push\s+--force|git\s+clean\s+-fdx)", re.IGNORECASE),
+        re.compile(r"(?:^|\s)python\w?\s+.*-c\b", re.IGNORECASE),
+        re.compile(r"(?:^|\s)(?:curl|wget)\b", re.IGNORECASE),
+        re.compile(r"(?:^|\s)(?:nc|ncat)\b", re.IGNORECASE),
     ]
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self._config = config
+
+    def build_context(self, permission: PermissionType) -> ToolContext:
+        """根据配置和权限类型构建 ToolContext。"""
+        config = self._config
+        if config is None:
+            return ToolContext(permission_mode={permission})
+
+        allowed_paths: list[Path] = []
+        forbidden_paths: list[Path] = []
+        allowed_commands: list[str] = []
+
+        if permission == PermissionType.WORKSPACE_WRITE:
+            project_root = Path(config.project.root).resolve()
+            allowed_paths = [project_root]
+            forbidden_paths = [project_root / d for d in _EDIT_FORBIDDEN_DIRS]
+
+        if permission == PermissionType.TEST_EXECUTION:
+            allowed_commands = list(config.project.allowed_commands)
+
+        return ToolContext(
+            permission_mode={permission},
+            allowed_paths=allowed_paths,
+            forbidden_paths=forbidden_paths,
+            allowed_commands=allowed_commands,
+        )
 
     def is_allowed(self, spec: ToolSpec) -> bool:
         """根据权限类型判断工具是否属于默认可执行。"""
@@ -43,7 +77,11 @@ class PermissionGuard:
 
     def _check_edit_code(self, context: ToolContext, payload: dict[str, Any]) -> tuple[bool, str]:
         """检查文件写入是否落在允许路径内。"""
-        target = Path(str(payload.get("path", ""))).resolve()
+        raw = str(payload.get("path", ""))
+        target_path = Path(raw).expanduser()
+        if not target_path.is_absolute() and self._config is not None:
+            target_path = Path(self._config.project.root).expanduser() / target_path
+        target = target_path.resolve()
         if any(self._is_under(target, forbidden) for forbidden in context.forbidden_paths):
             return False, "path is forbidden"
         if context.allowed_paths and not any(self._is_under(target, allowed) for allowed in context.allowed_paths):
@@ -75,16 +113,12 @@ class PermissionGuard:
             allowed = {cmd.lower() for cmd in context.allowed_commands}
             if tokens[0].lower() not in allowed:
                 return False, "command not in whitelist"
-            if tokens[0].lower() == "mvn":
-                return True, "allowed"
+            return True, "allowed"
 
         if normalized_command.startswith("mvn ") or normalized_command == "mvn":
             return True, "allowed"
 
-        if not context.allowed_commands:
-            return False, "command not in whitelist"
-
-        return True, "allowed"
+        return False, "command not in whitelist"
 
     def _is_under(self, target: Path, root: Path) -> bool:
         """判断目标路径是否位于某个根路径之下。"""

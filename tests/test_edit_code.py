@@ -295,6 +295,26 @@ def test_edit_code_rejects_diff_header_mismatch(tmp_path):
     assert path.read_text(encoding="utf-8") == "class Demo { int x = 1; }\n"
 
 
+def test_edit_code_accepts_absolute_path_in_diff_header(tmp_path):
+    """Agent may write absolute paths in diff headers; auto-extract relative portion."""
+    tool, source, _config = _configured_tool_with_source(tmp_path)
+    abs_path = str(source)
+
+    result = tool.run(
+        {
+            "path": str(source),
+            "content": f"--- a/{abs_path}\n"
+            f"+++ b/{abs_path}\n"
+            "@@\n"
+            "-class Demo { int x = 1; }\n"
+            "+class Demo { int x = 2; }",
+        }
+    )
+
+    assert result.success is True
+    assert source.read_text(encoding="utf-8") == "class Demo { int x = 2; }\n"
+
+
 def test_edit_code_rejects_large_patch(tmp_path):
     original = "".join(f"class Line{i} {{}}\n" for i in range(60))
     tool, path, _config = _configured_tool_with_source(tmp_path, content=original)

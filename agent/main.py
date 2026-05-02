@@ -77,7 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print()
 
     registry = ToolRegistry()
-    permission_guard = PermissionGuard()
+    permission_guard = PermissionGuard(config)
     task_store = TaskStore()
     session_store = SessionStore()
     skills_dir = Path(config.workspace) / "skills"

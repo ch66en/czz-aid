@@ -22,7 +22,7 @@ from agent.llm.openai_compatible_client import OpenAICompatibleClient
 from agent.models import BugEvent, RepairTask, TaskStatus, ToolResult, ToolSpec
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
-from agent.tools.base import ToolContext
+from agent.tools.base import PermissionType
 from agent.tools.ast_symbols_tool import AstSymbolsTool
 from agent.tools.apply_test_patch import ApplyTestPatchTool
 from agent.tools.compile_tool import RunCompileTool
@@ -338,7 +338,7 @@ class RepairAgent:
 
                 arguments = self._prepare_tool_arguments(tool.spec.name, action.get("arguments", {}), bug_event)
                 action["arguments"] = arguments
-                allowed, reason = self.permission_guard.can_execute(tool.spec, ToolContext(permission_mode={tool.permission}), arguments)
+                allowed, reason = self.permission_guard.can_execute(tool.spec, self.permission_guard.build_context(tool.permission), arguments)
                 if not allowed:
                     last_result = ToolResult(tool=tool.spec.name, success=False, exit_code=1, stdout_summary="", stderr_summary=reason, data={"arguments": arguments, "tool": tool.spec.name}, artifacts=[])
                     history.append({"tool": tool.spec.name, "result": last_result.model_dump()})
@@ -1023,7 +1023,7 @@ class RepairAgent:
             },
         }
         result = self._run_feishu_tool(payload)
-        record = {"bug": bug_event.model_dump(mode="json"), "session": session, "last_result": last_result.model_dump() if last_result else None, "feishu_result": result.model_dump()}
+        record = {"bug": bug_event.model_dump(mode="json"), "last_result": last_result.model_dump() if last_result else None, "feishu_result": result.model_dump()}
         self.session_store.put(f"feishu_help:{bug_event.bug_id}", record)
         session["feishu_help_payload"] = payload
         session["feishu_help_result"] = result.model_dump()
@@ -1036,6 +1036,7 @@ class RepairAgent:
 
     def _notify_whitelist_denial(self, bug_event: BugEvent, session: dict[str, Any], denied_entry: dict[str, Any]) -> ToolResult:
         """发送白名单拒绝通知，方便人工后续加入白名单。"""
+        safe_denied_entry = {k: v for k, v in denied_entry.items() if k != "action"}
         payload = {
             "action": "send_help_card",
             "args": {
@@ -1046,14 +1047,13 @@ class RepairAgent:
                     "exit_code": 1,
                     "stdout_summary": "",
                     "stderr_summary": f"whitelist denied: {denied_entry.get('reason', '')}",
-                    "data": denied_entry,
+                    "data": safe_denied_entry,
                 },
                 "session_path": bug_event.bug_id,
-                "session": session,
             },
         }
         result = self._run_feishu_tool(payload)
-        record = {"bug": bug_event.model_dump(mode="json"), "denied_entry": denied_entry, "session": session, "feishu_result": result.model_dump()}
+        record = {"bug": bug_event.model_dump(mode="json"), "denied_entry": safe_denied_entry, "feishu_result": result.model_dump()}
         self.session_store.put(f"whitelist_denied:{bug_event.bug_id}", record)
         notifications = session.get("denial_notifications", [])
         if not isinstance(notifications, list):

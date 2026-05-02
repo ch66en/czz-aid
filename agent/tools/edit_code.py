@@ -183,6 +183,15 @@ class EditCodeTool(BaseTool):
             return "diff old and new paths must match"
         expected = relative.as_posix()
         if new_path != expected:
+            # Agent may write the absolute path in diff header; try to extract relative portion
+            if self.config is not None:
+                project_root = Path(self.config.project.root).expanduser().resolve()
+                try:
+                    resolved_relative = Path(new_path.replace("\\", "/")).resolve().relative_to(project_root)
+                    if resolved_relative.as_posix() == expected:
+                        return ""
+                except (ValueError, OSError):
+                    pass
             return "diff header path does not match target path"
         return ""
 
