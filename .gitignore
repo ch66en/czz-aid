@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.pytest_tmp/
+.coverage
+htmlcov/
+
+# Project runtime data
+data/sessions/
+tmp/
+
+# Config with secrets
+config.yaml
+config.local.yaml
+config.example.copy.yaml
+
+# OS
+.DS_Store
+Thumbs.db

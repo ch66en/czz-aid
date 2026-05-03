@@ -111,6 +111,7 @@ class RepairAgent:
                 "Call exactly one function tool per turn.",
                 "Use bug_event.frames and frame_contexts to locate the failure; full traceback is omitted to avoid repeated stack noise.",
                 "Prefer the top business frame as the first repair target unless evidence points elsewhere.",
+                "CRITICAL: frame_contexts may contain pre-extracted source code for some business frames as reference, but you should still call read_code to gather full context and evidence before repairing. When calling read_code or search_code, always use the full filePath from frame_contexts or bug_event.frames — never use bare filenames like 'OrderService.java'.",
                 "Use search_code for project-scoped Java keyword searches; its root is enforced by runtime.",
                 "edit_code content must be a unified diff/patch, not a full file rewrite.",
                 "After a successful edit, finish_patch triggers compile and test; do not skip them.",
@@ -127,65 +128,6 @@ class RepairAgent:
             "session": prompt_session,
         }
         return json.dumps(prompt, ensure_ascii=False, default=str)
-        tool_usage_notes = [
-            "1. 只能从 Tools 列表中选择工具名，不允许臆造新工具。",
-            "2. 遇到 Java traceback 或测试失败中的 file:line 时，必须优先使用 read_symbol_at(path, line) 或 ast_symbols(path) 定位。",
-            "3. 不能在有 file:line 的情况下直接读取整个大文件。",
-            "4. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。",
-            "5. 如果 read_code 不传 start_line/end_line 且文件太大失败，应改用 ast_symbols/read_symbol_at。",
-            "6. 修改代码前必须至少读取相关函数代码。",
-            "7. edit_code 只能在写入允许目录后再执行，content 必须使用统一 diff/patch 格式，且修改后必须走 compile -> test。",
-            "8. run_compile 是唯一允许的编译步骤，禁止直接跳过。",
-            "9. run_test 是唯一允许的测试步骤，编译成功后必须执行。",
-            "10. run_command 只能用于白名单命令，不允许危险命令。",
-            "11. finish_patch 只能在已经完成代码修改后输出，表示进入 compile/test 阶段。",
-            "12. 若 compile/test 失败，必须把失败摘要纳入下一轮决策。",
-        ]
-        return (
-            "你是一个受严格流程约束的自动修复代理。\n"
-            "必须遵循以下硬约束：\n"
-            "1. 先检索相关技能，再做工具调用。\n"
-            "2. 如果 FrameContexts 非空，必须先读取并理解相关函数体，再决定修改。\n"
-            "3. 当 traceback 对应的业务函数已经通过 FrameContexts / read_symbol_at / read_code 完整暴露，并且错误点可直接从源码中判断时，应停止继续收集信息，直接输出修复方案并调用 edit_code。\n"
-            "4. edit_code 的 content 必须使用统一 diff/patch 格式，禁止输出整文件全文。\n"
-            "5. patch 应尽量只覆盖 traceback 命中的函数或最小相关代码块；通常只包含一个 hunk。\n"
-            "6. patch 示例：--- a/src/main/java/X.java\\n+++ b/src/main/java/X.java\\n@@\\n-        badLine();\\n+        fixedLine();\n"
-            "6. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
-            "7. 不能在有 file:line 的情况下直接读取整个大文件。\n"
-            "8. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。\n"
-            "9. 修改代码前必须至少读取相关函数代码。\n"
-            "10. 允许多步工具调用，但最多自动修复 3 轮。\n"
-            "11. 任何修改后都必须执行编译。\n"
-            "12. 编译成功后必须执行测试。\n"
-            "13. 禁止跳过 compile。\n"
-            "14. 禁止跳过 test。\n"
-            "15. 禁止自动合并 PR。\n"
-            "16. 成功后进入创建 PR 流程，失败后发送飞书求助。\n"
-            "4. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
-            "5. 只有在当前上下文不足以定位根因时，才继续使用 read_symbol_at(path, line) 或 ast_symbols(path) 深入定位。\n"
-            "6. 不能在有 file:line 的情况下直接读取整个大文件。\n"
-            "7. read_symbol_at 返回的 path、symbolId、startLine、endLine、code、contentHash 是后续分析和补丁定位依据。\n"
-            "8. 修改代码前必须至少读取相关函数代码。\n"
-            "9. 允许多步工具调用，但最多自动修复 3 轮。\n"
-            "10. 任何修改后都必须执行编译。\n"
-            "11. 编译成功后必须执行测试。\n"
-            "12. 禁止跳过 compile。\n"
-            "13. 禁止跳过 test。\n"
-            "14. 禁止自动合并 PR。\n"
-            "15. 成功后进入创建 PR 流程，失败后发送飞书求助。\n"
-            "\n"
-            f"BugEvent: {bug_event.model_dump_json()}\n"
-            f"Skills: {json.dumps(skills, ensure_ascii=False)}\n"
-            f"Session: {json.dumps(session, ensure_ascii=False)}\n"
-            f"FrameContexts: {json.dumps(session.get('frame_contexts', []), ensure_ascii=False)}\n"
-            f"Tools: {json.dumps(tool_specs, ensure_ascii=False)}\n"
-            f"ToolUsageNotes: {json.dumps(tool_usage_notes, ensure_ascii=False)}\n"
-            "\n"
-            "LLM 必须只输出 JSON action，格式如下：\n"
-            '{"tool":"SearchCode","arguments":{},"reason":"..."}\n'
-            '当准备结束修改时输出 {"tool":"finish_patch","arguments":{},"reason":"..."}。\n'
-            "如果编译或测试失败，把失败摘要作为上下文继续下一轮。"
-        )
 
     def repair(self, bug_id: str) -> RepairRunResult:
         """执行最多三轮的自动修复流程。"""

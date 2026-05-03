@@ -1,8 +1,6 @@
 pydantic
 PyYAML
 requests
-watchdog
-gitpython
 pytest
 openai
 tree-sitter

@@ -22,7 +22,7 @@ class ReadCodeTool(BaseTool):
         """返回源码读取工具的规格说明。"""
         return ToolSpec(
             name="read_code",
-            description="Read a code file or line range",
+            description="Read a code file or line range. Accepts absolute path, project-relative path, or bare filename (auto-resolved via project search).",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -71,4 +71,19 @@ class ReadCodeTool(BaseTool):
         if path.is_absolute() or self.config is None:
             return path
         project_root = Path(self.config.project.root).expanduser()
-        return project_root / path
+        resolved = project_root / path
+        # 短路径直接拼接存在时返回
+        if resolved.exists():
+            return resolved
+        # 短文件名（无目录分隔符）：在项目内搜索匹配文件
+        if len(path.parts) == 1:
+            matches = sorted(project_root.rglob(path.name))
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                # 优先选 src/main/java 下的
+                for m in matches:
+                    if "src" in str(m) and "main" in str(m):
+                        return m
+                return matches[0]
+        return resolved
