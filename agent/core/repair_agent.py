@@ -733,7 +733,7 @@ class RepairAgent:
 
         commands = [
             ["git", "checkout", "-B", branch],
-            ["git", "add", *[str(path.relative_to(project_root)) for path in edited_paths]],
+            ["git", "add", "-f", *[str(path.relative_to(project_root)) for path in edited_paths]],
             ["git", "commit", "-m", f"fix: auto repair {bug_event.bug_id}"],
             ["git", "push", "--force", "-u", "origin", branch],
         ]

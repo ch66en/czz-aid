@@ -46,6 +46,8 @@ class ReadCodeTool(BaseTool):
         path = self._resolve_path(str(data.get("path", "")))
         if not path.exists():
             return ToolResult(tool="read_code", success=False, exit_code=1, stderr_summary="code file not found", data={"path": str(path)}, artifacts=[])
+        if path.is_dir():
+            return ToolResult(tool="read_code", success=False, exit_code=1, stderr_summary="path is a directory, not a file", data={"path": str(path)}, artifacts=[])
         lines = path.read_text(encoding="utf-8").splitlines()
         start_line = data.get("start_line")
         end_line = data.get("end_line")
