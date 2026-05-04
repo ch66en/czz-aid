@@ -9,7 +9,7 @@ from typing import Iterable
 from agent.models import StackFrame
 
 
-_FRAME_PATTERN = re.compile(r"^at\s+(?P<class_method>[\w.$<>]+)\((?P<source>[^)]*)\)$")
+_FRAME_PATTERN = re.compile(r"^at\s+(?P<class_method>[\w.$<>]+)\((?P<source>[^)]*)\)(?: ~\[.*\])?$")
 _EXCEPTION_PATTERN = re.compile(r"^(?P<type>[\w.$]+)(?::\s*(?P<message>.*))?$")
 _EXCEPTION_START_SEARCH = re.compile(
     r'(?:Exception in thread "[^"]+"\s+)?'
