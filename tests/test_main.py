@@ -21,12 +21,14 @@ def test_repair_reads_log_from_path(tmp_path: Path, monkeypatch) -> None:
 
     from agent import main as main_module
 
-    monkeypatch.setattr(main_module, "load_config", lambda _: main_module.load_config("config.example.yaml"))
+    config = AppConfig()
+    config.session.backend = "memory"
+    monkeypatch.setattr(main_module, "load_config", lambda _: config)
     monkeypatch.setattr(main_module, "ToolRegistry", lambda: type("R", (), {"get": lambda self, name: None, "register": lambda self, tool: None, "list_tools": lambda self: []})())
-    monkeypatch.setattr(main_module, "PermissionGuard", lambda: object())
+    monkeypatch.setattr(main_module, "PermissionGuard", lambda config=None: object())
     monkeypatch.setattr(main_module, "TaskStore", lambda: object())
     monkeypatch.setattr(main_module, "SessionStore", lambda: object())
-    monkeypatch.setattr(main_module, "SkillStore", lambda: object())
+    monkeypatch.setattr(main_module, "SkillStore", lambda skills_dir=None: type("S", (), {"load_from_disk": lambda self: 0})())
     monkeypatch.setattr(main_module, "TaskManager", lambda task_store: type("M", (), {"create_task": lambda self, bug_id: None, "update_status": lambda self, bug_id, status: None})())
     monkeypatch.setattr(main_module, "RepairAgent", lambda **kwargs: type("A", (), {"repair": lambda self, bug_id: None})())
     monkeypatch.setattr(main_module, "IngestionPipeline", lambda **kwargs: type("P", (), {"process": fake_process})())
@@ -42,6 +44,7 @@ def test_watch_starts_log_watcher_with_config(monkeypatch) -> None:
     from agent import main as main_module
 
     config = AppConfig()
+    config.session.backend = "memory"
     config.project.name = "order-service"
     config.agent.watch_paths = ["./runtime/app.log"]
     created: dict[str, object] = {}
@@ -67,10 +70,10 @@ def test_watch_starts_log_watcher_with_config(monkeypatch) -> None:
 
     monkeypatch.setattr(main_module, "load_config", lambda _: config)
     monkeypatch.setattr(main_module, "ToolRegistry", lambda: type("R", (), {"get": lambda self, name: None, "register": lambda self, tool: None, "list_tools": lambda self: []})())
-    monkeypatch.setattr(main_module, "PermissionGuard", lambda: object())
+    monkeypatch.setattr(main_module, "PermissionGuard", lambda config=None: object())
     monkeypatch.setattr(main_module, "TaskStore", lambda: object())
     monkeypatch.setattr(main_module, "SessionStore", lambda: object())
-    monkeypatch.setattr(main_module, "SkillStore", lambda: object())
+    monkeypatch.setattr(main_module, "SkillStore", lambda skills_dir=None: type("S", (), {"load_from_disk": lambda self: 0})())
     monkeypatch.setattr(main_module, "TaskManager", lambda task_store: type("M", (), {"create_task": lambda self, bug_id: None, "update_status": lambda self, bug_id, status: None})())
     monkeypatch.setattr(main_module, "RepairAgent", lambda **kwargs: type("A", (), {"repair": lambda self, bug_id: None})())
     monkeypatch.setattr(main_module, "IngestionPipeline", lambda **kwargs: object())
@@ -87,3 +90,44 @@ def test_watch_starts_log_watcher_with_config(monkeypatch) -> None:
     assert created["watched"] is True
     assert created["review_started"] is True
     assert created["review_stopped"] is True
+
+
+def test_main_uses_sqlite_storage_when_configured(tmp_path: Path, monkeypatch) -> None:
+    from agent import main as main_module
+
+    config = AppConfig()
+    config.session.backend = "sqlite"
+    config.session.db_path = str(tmp_path / "agent.db")
+    created: dict[str, object] = {}
+
+    class FakeSQLiteTaskStore:
+        def __init__(self, db_path: str) -> None:
+            created["task_db_path"] = db_path
+
+    class FakeSQLiteSessionStore:
+        def __init__(self, db_path: str) -> None:
+            created["session_db_path"] = db_path
+
+    class FakeSQLiteDedupStore:
+        def __init__(self, db_path: str) -> None:
+            created["dedup_db_path"] = db_path
+
+    monkeypatch.setattr(main_module, "load_config", lambda _: config)
+    monkeypatch.setattr(main_module, "ToolRegistry", lambda: type("R", (), {"get": lambda self, name: None, "register": lambda self, tool: None, "list_tools": lambda self: []})())
+    monkeypatch.setattr(main_module, "PermissionGuard", lambda config=None: object())
+    monkeypatch.setattr(main_module, "SQLiteTaskStore", FakeSQLiteTaskStore)
+    monkeypatch.setattr(main_module, "SQLiteSessionStore", FakeSQLiteSessionStore)
+    monkeypatch.setattr(main_module, "SQLiteDedupStore", FakeSQLiteDedupStore)
+    monkeypatch.setattr(main_module, "SkillStore", lambda skills_dir=None: type("S", (), {"load_from_disk": lambda self: 0})())
+    monkeypatch.setattr(main_module, "TaskManager", lambda task_store: type("M", (), {"create_task": lambda self, bug_id: None, "update_status": lambda self, bug_id, status: None})())
+    monkeypatch.setattr(main_module, "RepairAgent", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "IngestionPipeline", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "Doctor", lambda config: type("D", (), {"run": lambda self: "doctor"})())
+    monkeypatch.setattr(main_module, "ReflectionSubAgent", lambda **kwargs: object())
+
+    exit_code = main(["doctor"])
+
+    assert exit_code == 0
+    assert created["task_db_path"] == str(tmp_path / "agent.db")
+    assert created["session_db_path"] == str(tmp_path / "agent.db")
+    assert created["dedup_db_path"] == str(tmp_path / "agent.db")

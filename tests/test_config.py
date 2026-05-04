@@ -13,6 +13,7 @@ def test_load_config_returns_defaults_when_file_missing(tmp_path: Path) -> None:
     assert isinstance(config, AppConfig)
     assert config.project.name == "default-project"
     assert config.project.test_command == 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
+    assert config.session.backend == "sqlite"
     assert config.agent.max_retry == 3
 
 
@@ -40,7 +41,9 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
               review_callback_mode: local
               review_callback_port: 8765
             session:
+              backend: sqlite
               root_dir: /tmp/sessions
+              db_path: /tmp/sessions/agent.db
             agent:
               max_retry: 5
               watch_paths:
@@ -61,6 +64,8 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
     assert config.feishu.webhook == "https://open.feishu.cn/webhook"
     assert config.feishu.review_callback_mode == "local"
     assert config.feishu.review_callback_port == 8765
+    assert config.session.backend == "sqlite"
     assert config.session.root_dir == "/tmp/sessions"
+    assert config.session.db_path == "/tmp/sessions/agent.db"
     assert config.agent.max_retry == 5
     assert config.agent.watch_paths == ["./runtime/logs"]

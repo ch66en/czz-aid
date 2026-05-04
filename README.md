@@ -920,4 +920,113 @@ storage/       Storage: session store, skill store, SQLite helper, task store
 
 ---
 
+#### 3.4 Future Improvements
+
+**1. Unified Storage Layer — Migrate SessionStore / TaskStore to SQLite**
+
+- **Problem:** `SessionStore` and `TaskStore` are pure in-memory dicts; all task history and session state are lost on process restart. Meanwhile, `SQLiteDedupStore` already exists and works.
+- **Solution:**
+  - Define a `KeyValueStore` protocol with `get`, `put`, `delete`, `list_keys` methods.
+  - Implement `SQLiteKVStore` backed by a single `sessions` table (`key TEXT PK, value JSON, updated_at TIMESTAMP`), reusing the existing `SQLiteRepo` connection helper.
+  - Implement `SQLiteTaskStore` backed by a `tasks` table (`bug_id TEXT PK, status TEXT, pr_url TEXT, agent_branch TEXT, ...`).
+  - Keep `MemoryKVStore` / `MemoryTaskStore` as drop-in replacements for unit tests (no SQLite dependency).
+  - Migration: add a `--migrate-memory-to-sqlite` CLI flag that dumps current in-memory state to the SQLite file on first upgrade.
+- **Benefit:** Survives restarts, enables multi-process access, and provides a single storage backend to reason about.
+
+**2. RepairAgent Decomposition — Extract PR, Notification, and Build Services**
+
+- **Problem:** `repair_agent.py` is ~1026 lines; the `repair()` method alone spans 200+ lines mixing LLM orchestration, compile/test execution, PR creation, Feishu notification, and rollback logic.
+- **Solution:** Extract three independent services behind clear interfaces:
+  ```
+  class BuildService:          # runs compile + test, returns BuildResult
+      def gate(self) -> BuildResult: ...
+
+  class PRService:             # creates branch, commits, pushes, opens PR
+      def create(self, ...) -> PRResult: ...
+
+  class NotificationService:   # sends Feishu cards, handles review callbacks
+      def notify(self, ...) -> None: ...
+  ```
+  - `RepairAgent.repair()` becomes a thin orchestrator: LLM loop → `BuildService.gate()` → `PRService.create()` → `NotificationService.notify()`.
+  - Each service is independently testable with mock dependencies.
+  - Rollback logic moves into `BuildService` (it already owns compile/test context).
+- **Benefit:** Single-responsibility classes, easier unit testing, and each service can be swapped or extended independently.
+
+**3. Platform Abstraction — Introduce `CodeHostingProvider` Interface**
+
+- **Problem:** PR creation is hardcoded to Gitee REST API (`requests.post` to `gitee.com`). This blocks adoption by teams using GitHub or GitLab.
+- **Solution:**
+  ```python
+  class CodeHostingProvider(ABC):
+      @abstractmethod
+      def create_branch(self, branch: str, base: str) -> BranchResult: ...
+      @abstractmethod
+      def push(self, branch: str, force: bool = False) -> PushResult: ...
+      @abstractmethod
+      def create_pull_request(self, title: str, body: str, head: str, base: str) -> PRResult: ...
+      @abstractmethod
+      def parse_remote(self, git_remote: str) -> tuple[str, str]: ...
+  ```
+  - Implementations: `GiteeProvider`, `GitHubProvider`, `GitLabProvider`.
+  - `GitTool` accepts a `CodeHostingProvider` instance via constructor injection (replaces the current inline `requests` calls).
+  - Provider selection via `config.yaml → platform.provider: gitee | github | gitlab`.
+  - `GitHubProvider` uses `gh` CLI or `PyGithub`; `GitLabProvider` uses `python-gitlab`.
+- **Benefit:** Zero code change to support a new hosting platform — just implement the interface and add config.
+
+**4. Multi-Language Extensibility — Beyond Java**
+
+- **Problem:** AST extraction (`tree-sitter-java`), traceback parsing (Java regex patterns), and file path constraints (`src/main/java`) are all Java-specific. The architecture is language-agnostic in design but Java-locked in practice.
+- **Solution:**
+  - Introduce a `LanguagePlugin` protocol:
+    ```python
+    class LanguagePlugin(ABC):
+        @abstractmethod
+        def parse_traceback(self, text: str) -> ParsedTraceback: ...
+        @abstractmethod
+        def extract_symbols(self, file: Path, line: int) -> SymbolInfo | None: ...
+        @abstractmethod
+        def editable_roots(self) -> tuple[tuple[str, ...], ...]: ...
+        @abstractmethod
+        def file_extensions(self) -> set[str]: ...
+    ```
+  - Implement `JavaPlugin` (refactor existing code), `PythonPlugin` (traceback + ast module), `GoPlugin` (panic stack + `go/parser`).
+  - `EditCodeTool` delegates path validation to the active plugin's `editable_roots()` and `file_extensions()`.
+  - `TracebackParser` delegates regex matching to the plugin.
+  - Config: `project.language: java | python | go`.
+- **Benefit:** Adding a new language requires implementing one plugin class — no changes to the agent, tools, or pipeline.
+
+**5. RepairAgent Method Refactoring — Break Up the Long Method**
+
+- **Problem:** `repair()` contains nested `while True` loops with inline compile/test/rollback/PR/notification logic, making it hard to read, test, and modify.
+- **Solution:** Refactor into focused private methods:
+  ```python
+  def repair(self, bug_id: str) -> RepairRunResult:
+      task, bug_event, session, skills, prompt = self._prepare(bug_id)
+      for attempt in range(1, self.config.agent.max_retry + 1):
+          result = self._attempt_repair(attempt, bug_event, session, skills, prompt)
+          if result.success or attempt == self.config.agent.max_retry:
+              return result
+      return RepairRunResult(success=False, status="exhausted", message="all attempts failed")
+
+  def _attempt_repair(self, attempt, bug_event, session, skills, prompt) -> RepairRunResult:
+      """Single attempt: LLM loop → build gate → PR → notify."""
+      llm_result = self._run_llm_loop(bug_event, session, skills, prompt)
+      if not llm_result.patched:
+          return RepairRunResult(success=False, status="no_patch", ...)
+      build = self._build_gate()
+      if not build.success:
+          self._rollback(session, bug_event)
+          return RepairRunResult(success=False, status="build_failed", ...)
+      pr = self._create_pr(task, bug_event, session)
+      if not pr.success:
+          return RepairRunResult(success=False, status="pr_failed", ...)
+      self._notify_feishu(bug_event, session, pr)
+      return RepairRunResult(success=True, status="passed", ...)
+  ```
+  - Each `_xxx` method is < 50 lines and independently testable.
+  - The outer `repair()` becomes a 10-line orchestrator.
+- **Benefit:** Readability, testability, and easier extension (e.g., adding a new gate step).
+
+---
+
 <p align="right"><a href="#top">Back to top</a> | <a href="#zh">中文</a></p>

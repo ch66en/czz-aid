@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from agent.config import load_config
-from agent.core.dedup_engine import DedupEngine
+from agent.core.dedup_engine import DedupEngine, MemoryDedupStore, SQLiteDedupStore
 from agent.core.permission_guard import PermissionGuard
 from agent.core.repair_agent import RepairAgent
 from agent.core.task_manager import TaskManager
@@ -20,9 +20,9 @@ from agent.ingestion.sanitizer import Sanitizer
 from agent.ingestion.traceback_parser import TracebackParser
 from agent.llm.openai_compatible_client import OpenAICompatibleClient
 from agent.reflection.reflection_subagent import ReflectionSubAgent
-from agent.storage.session_store import SessionStore
+from agent.storage.session_store import SessionStore, SQLiteSessionStore
 from agent.storage.skill_store import SkillStore
-from agent.storage.task_store import TaskStore
+from agent.storage.task_store import TaskStore, SQLiteTaskStore
 from agent.ui import print_banner, info, success as ui_success, error as ui_error
 
 
@@ -83,8 +83,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     registry = ToolRegistry()
     permission_guard = PermissionGuard(config)
-    task_store = TaskStore()
-    session_store = SessionStore()
+    storage_backend = config.session.backend.strip().lower()
+    if storage_backend == "sqlite":
+        db_path = config.session.db_path or str(Path(config.session.root_dir) / "agent.db")
+        task_store = SQLiteTaskStore(db_path)
+        session_store = SQLiteSessionStore(db_path)
+        dedup_store = SQLiteDedupStore(db_path)
+        info(f"storage=sqlite  db={db_path}")
+    else:
+        task_store = TaskStore()
+        session_store = SessionStore()
+        dedup_store = MemoryDedupStore()
+        info("storage=memory")
     skills_dir = Path(config.workspace) / "skills"
     skill_store = SkillStore(skills_dir=skills_dir)
     loaded_skills = skill_store.load_from_disk()
@@ -103,9 +113,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         skill_store=skill_store,
         llm_client=llm_client,
     )
-    pipeline = IngestionPipeline(session_store=session_store, dedup_engine=DedupEngine(), sanitizer=Sanitizer(), traceback_parser=TracebackParser(), repair_agent=repair_agent)
+    dedup_engine = DedupEngine(store=dedup_store)
+    pipeline = IngestionPipeline(session_store=session_store, dedup_engine=dedup_engine, sanitizer=Sanitizer(), traceback_parser=TracebackParser(), repair_agent=repair_agent)
     doctor = Doctor(config=config)
-    reflection = ReflectionSubAgent(config=config, session_store=session_store, skill_store=skill_store, llm_client=llm_client)
+    reflection = ReflectionSubAgent(config=config, session_store=session_store, skill_store=skill_store, llm_client=llm_client, dedup_engine=dedup_engine)
 
     if args.command == "doctor":
         print(doctor.run())

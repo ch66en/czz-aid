@@ -61,7 +61,9 @@ class FeishuConfig(BaseModel):
 class SessionConfig(BaseModel):
     """定义会话、状态与产物存储配置。"""
 
+    backend: str = "sqlite"
     root_dir: str = "./data/sessions"
+    db_path: str = "./data/sessions/agent.db"
     retention_days: int = 7
 
 

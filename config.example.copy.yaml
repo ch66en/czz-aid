@@ -28,7 +28,9 @@ feishu:
   app_secret: ""
   approval_chat_id: ""
 session:
+  backend: sqlite
   root_dir: ./data/sessions
+  db_path: ./data/sessions/agent.db
   retention_days: 7
 agent:
   name: auto-fix-agent
