@@ -36,6 +36,71 @@ def test_read_symbol_at_java_method() -> None:
     assert result["contentHash"].startswith("sha256:")
 
 
+def test_ast_symbols_tracks_container_parents_for_java_edge_cases(tmp_path: Path) -> None:
+    source = tmp_path / "EdgeCases.java"
+    source.write_text(
+        "\n".join(
+            [
+                "package demo;",
+                "",
+                "interface Ops {",
+                "    default String label() {",
+                "        return \"ok\";",
+                "    }",
+                "}",
+                "",
+                "public class EdgeCases {",
+                "    public EdgeCases() {",
+                "    }",
+                "",
+                "    class Inner {",
+                "        String value() {",
+                "            return \"inner\";",
+                "        }",
+                "    }",
+                "",
+                "    Runnable runnable() {",
+                "        return new Runnable() {",
+                "            @Override",
+                "            public void run() {",
+                "                System.out.println(\"x\");",
+                "            }",
+                "        };",
+                "    }",
+                "}",
+                "",
+                "record EdgeRecord(String name) {",
+                "    String upper() {",
+                "        return name.toUpperCase();",
+                "    }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    extractor = JavaAstSymbolExtractor()
+
+    result = extractor.extract(str(source))
+    symbols = result["symbols"]
+
+    constructor = next(symbol for symbol in symbols if symbol["kind"] == "constructor" and symbol["name"] == "EdgeCases")
+    inner = next(symbol for symbol in symbols if symbol["kind"] == "class" and symbol["name"] == "Inner")
+    inner_value = next(symbol for symbol in symbols if symbol["kind"] == "method" and symbol["name"] == "value")
+    default_method = next(symbol for symbol in symbols if symbol["kind"] == "method" and symbol["name"] == "label")
+    record_method = next(symbol for symbol in symbols if symbol["kind"] == "method" and symbol["name"] == "upper")
+
+    assert constructor["parent"] == "EdgeCases"
+    assert inner["parent"] == "EdgeCases"
+    assert inner_value["parent"] == "Inner"
+    assert default_method["parent"] == "Ops"
+    assert record_method["parent"] == "EdgeRecord"
+
+    anonymous_line = source.read_text(encoding="utf-8").splitlines().index('                System.out.println("x");') + 1
+    symbol_at = extractor.find_symbol_at(str(source), anonymous_line)
+
+    assert symbol_at["symbol"]["name"] == "run"
+
+
 def test_read_code_range() -> None:
     tool = ReadCodeTool()
 

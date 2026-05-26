@@ -91,16 +91,15 @@ class JavaAstSymbolExtractor:
 
     def _collect_symbols(self, path: Path, source: bytes, node: Any, parent: str | None = None) -> list[JavaSymbol]:
         symbols: list[JavaSymbol] = []
-        stack = [(node, parent)]
-        while stack:
-            current, current_parent = stack.pop()
+        initial_containers = [parent] if parent else []
+
+        def walk(current: Any, containers: list[str]) -> None:
             kind = _SYMBOL_KIND_BY_NODE.get(current.type)
+            next_containers = containers
             if kind:
                 name = self._node_name(source, current)
                 signature = self._node_signature(source, current, kind, name)
-                symbol_parent = current_parent if kind in _MEMBER_KINDS else None if current_parent is None else current_parent
-                if kind in _MEMBER_KINDS and current_parent is None:
-                    symbol_parent = self._nearest_container_name(stack, source, current)  # type: ignore[arg-type]
+                symbol_parent = containers[-1] if containers else None
                 symbol = JavaSymbol(
                     symbolId=f"{path}:{current.start_point[0] + 1}-{current.end_point[0] + 1}:{kind}:{signature}",
                     name=name,
@@ -115,12 +114,13 @@ class JavaAstSymbolExtractor:
                     endByte=current.end_byte,
                 )
                 symbols.append(symbol)
-                next_parent = name if kind in _CONTAINER_KINDS else symbol_parent
-                for child in reversed(current.children):
-                    stack.append((child, next_parent))
-            else:
-                for child in reversed(current.children):
-                    stack.append((child, current_parent))
+                if kind in _CONTAINER_KINDS:
+                    next_containers = [*containers, name]
+
+            for child in current.children:
+                walk(child, next_containers)
+
+        walk(node, initial_containers)
         return symbols
 
     def _node_name(self, source: bytes, node: Any) -> str:
