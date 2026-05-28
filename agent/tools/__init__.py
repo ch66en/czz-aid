@@ -8,6 +8,8 @@ from agent.tools.git_diff import GitDiffTool
 from agent.tools.read_code import ReadCodeTool
 from agent.tools.run_command import RunCommandTool
 from agent.tools.search_code import SearchCodeTool
+from agent.tools.search_project_doc import SearchProjectDocTool
+from agent.tools.search_skill import SearchSkillTool
 from agent.tools.test_tool import RunTestTool
 
 __all__ = [

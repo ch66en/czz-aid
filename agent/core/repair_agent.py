@@ -20,6 +20,7 @@ from agent.core.tool_registry import ToolRegistry
 from agent.ingestion.sanitizer import Sanitizer
 from agent.llm.openai_compatible_client import OpenAICompatibleClient
 from agent.models import BugEvent, RepairTask, TaskStatus, ToolResult, ToolSpec
+from agent.rag.knowledge_service import KnowledgeService
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.tools.base import PermissionType
@@ -33,6 +34,8 @@ from agent.tools.read_code import ReadCodeTool
 from agent.tools.read_symbol_at_tool import ReadSymbolAtTool
 from agent.tools.run_command import RunCommandTool
 from agent.tools.search_code import SearchCodeTool
+from agent.tools.search_project_doc import SearchProjectDocTool
+from agent.tools.search_skill import SearchSkillTool
 from agent.tools.test_tool import RunTestTool
 import agent.ui as ui
 
@@ -62,6 +65,7 @@ class RepairAgent:
         session_store: SessionStore,
         skill_store: SkillStore,
         llm_client: OpenAICompatibleClient | None = None,
+        knowledge_service: KnowledgeService | None = None,
     ) -> None:
         """初始化修复代理所依赖的各项组件。"""
         self.config = config
@@ -71,6 +75,7 @@ class RepairAgent:
         self.session_store = session_store
         self.skill_store = skill_store
         self.llm_client = llm_client
+        self.knowledge_service = knowledge_service
         self.sanitizer = Sanitizer()
         self._ensure_core_tools()
         apply_test_patch_tool = self.registry.get("apply_test_patch")
@@ -87,6 +92,8 @@ class RepairAgent:
             ReadSymbolAtTool(),
             ReadCodeTool(self.config),
             SearchCodeTool(),
+            SearchSkillTool(self.config, self.knowledge_service),
+            SearchProjectDocTool(self.config, self.knowledge_service),
             EditCodeTool(self.config),
             ApplyTestPatchTool(self.config),
             RunCommandTool(self.config),
@@ -97,7 +104,13 @@ class RepairAgent:
             if self.registry.get(tool.spec.name) is None:
                 self.registry.register(tool)
 
-    def build_prompt_template(self, bug_event: BugEvent, skills: list[str], session: dict[str, Any]) -> str:
+    def build_prompt_template(
+        self,
+        bug_event: BugEvent,
+        retrieved_skills: list[Any],
+        session: dict[str, Any],
+        retrieved_project_docs: list[Any] | None = None,
+    ) -> str:
         """构造修复代理系统提示词模板。"""
         frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
         prompt_session = dict(session)
@@ -111,6 +124,10 @@ class RepairAgent:
                 "Call exactly one function tool per turn.",
                 "Use bug_event.frames and frame_contexts to locate the failure; full traceback is omitted to avoid repeated stack noise.",
                 "Prefer the top business frame as the first repair target unless evidence points elsewhere.",
+                "Use retrieved_skills as prior repair experience. Treat them as guidance, not proof; verify against current code and tests.",
+                "Use retrieved_project_docs as business constraints. If project docs specify API contract, error code, status transition, or module responsibility, prioritize them over generic fixes.",
+                "When frame_contexts are insufficient, business semantics are unclear, or the exception touches API contracts, state transitions, module ownership, or error-code behavior, call search_project_doc before editing.",
+                "When you need precedent for a similar exception, repair pattern, or historical human review decision, call search_skill before editing.",
                 "CRITICAL: frame_contexts may contain pre-extracted source code for some business frames as reference, but you should still call read_code to gather full context and evidence before repairing. When calling read_code or search_code, always use the full filePath from frame_contexts or bug_event.frames — never use bare filenames like 'OrderService.java'.",
                 "Use search_code for project-scoped Java keyword searches; its root is enforced by runtime.",
                 "edit_code content must be a unified diff/patch, not a full file rewrite.",
@@ -124,7 +141,8 @@ class RepairAgent:
             "project": {"name": bug_event.project, "root": self.config.project.root},
             "bug_event": bug_summary,
             "frame_contexts": frame_contexts,
-            "skills": skills,
+            "retrieved_skills": self._serialize_retrieved_skills(retrieved_skills),
+            "retrieved_project_docs": self._serialize_retrieved_skills(retrieved_project_docs or []),
             "session": prompt_session,
         }
         return json.dumps(prompt, ensure_ascii=False, default=str)
@@ -139,8 +157,9 @@ class RepairAgent:
         frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
         if frame_contexts:
             session = {**session, "frame_contexts": frame_contexts}
-        skills = self._load_skills(bug_event.project)
-        prompt_template = self.build_prompt_template(bug_event, skills, session)
+        retrieved_skills = self._retrieve_skills(bug_event)
+        retrieved_project_docs = self._retrieve_project_docs(bug_event, session)
+        prompt_template = self.build_prompt_template(bug_event, retrieved_skills, session, retrieved_project_docs)
         history: list[dict[str, Any]] = []
         llm_messages: list[dict[str, Any]] = [{"role": "system", "content": prompt_template}]
         last_result: ToolResult | None = None
@@ -383,7 +402,36 @@ class RepairAgent:
         """把 BugEvent 写入会话存储，供后续轮次读取。"""
         self.session_store.put(f"bug_event:{bug_event.bug_id}", bug_event.model_dump())
 
-    def _load_skills(self, project: str) -> list[str]:
+    def _serialize_retrieved_skills(self, skills: list[Any]) -> list[Any]:
+        serialized: list[Any] = []
+        for skill in skills:
+            if hasattr(skill, "model_dump"):
+                serialized.append(skill.model_dump(mode="json"))
+            else:
+                serialized.append(skill)
+        return serialized
+
+    def _retrieve_skills(self, bug_event: BugEvent) -> list[Any]:
+        if self.knowledge_service is not None and self.config.rag.enabled:
+            try:
+                results = self.knowledge_service.retrieve_skills_for_bug(bug_event, top_k=self.config.rag.top_k_skills)
+            except Exception as exc:
+                ui.warning(f"Skill RAG unavailable  error={exc}")
+            else:
+                if results:
+                    return results
+        return self._load_skills(bug_event.project, limit=self.config.rag.top_k_skills)
+
+    def _retrieve_project_docs(self, bug_event: BugEvent, session: dict[str, Any]) -> list[Any]:
+        if self.knowledge_service is None or not self.config.rag.enabled:
+            return []
+        try:
+            return self.knowledge_service.retrieve_project_docs_for_bug(bug_event, session=session, top_k=5)
+        except Exception as exc:
+            ui.warning(f"Project doc RAG unavailable  error={exc}")
+            return []
+
+    def _load_skills(self, project: str, limit: int | None = None) -> list[str]:
         """按项目检索相关技能。"""
         skills: list[str] = []
         for key in list(getattr(self.skill_store, "_items", {}).keys()):
@@ -391,6 +439,8 @@ class RepairAgent:
                 value = self.skill_store.get(key)
                 if value:
                     skills.append(value)
+                    if limit is not None and len(skills) >= limit:
+                        break
         return skills
 
     def _ask_llm(self, messages: list[dict[str, Any]], history: list[dict[str, Any]], bug_event: BugEvent, session: dict[str, Any]) -> dict[str, Any]:

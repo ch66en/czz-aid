@@ -131,3 +131,64 @@ def test_main_uses_sqlite_storage_when_configured(tmp_path: Path, monkeypatch) -
     assert created["task_db_path"] == str(tmp_path / "agent.db")
     assert created["session_db_path"] == str(tmp_path / "agent.db")
     assert created["dedup_db_path"] == str(tmp_path / "agent.db")
+
+
+def test_rag_index_skills_does_not_create_llm_client(tmp_path: Path, monkeypatch) -> None:
+    from agent import main as main_module
+
+    config = AppConfig()
+    config.workspace = str(tmp_path)
+    config.session.backend = "memory"
+    config.llm.api_key = "configured-but-not-needed"
+    created: dict[str, object] = {}
+
+    class FakeKnowledgeService:
+        def __init__(self, **kwargs) -> None:
+            created["knowledge_service"] = kwargs
+
+        def index_skills(self) -> int:
+            return 2
+
+        def index_local_docs(self) -> int:
+            return 3
+
+    def fail_llm_client(**kwargs):
+        raise AssertionError("rag-index-skills should not create an LLM client")
+
+    monkeypatch.setattr(main_module, "load_config", lambda _: config)
+    monkeypatch.setattr(main_module, "KnowledgeService", FakeKnowledgeService)
+    monkeypatch.setattr(main_module, "OpenAICompatibleClient", fail_llm_client)
+
+    exit_code = main(["rag-index-skills"])
+
+    assert exit_code == 0
+    assert created["knowledge_service"]["config"] is config
+
+
+def test_rag_index_docs_does_not_create_llm_client(tmp_path: Path, monkeypatch) -> None:
+    from agent import main as main_module
+
+    config = AppConfig()
+    config.workspace = str(tmp_path)
+    config.session.backend = "memory"
+    config.llm.api_key = "configured-but-not-needed"
+    created: dict[str, object] = {}
+
+    class FakeKnowledgeService:
+        def __init__(self, **kwargs) -> None:
+            created["knowledge_service"] = kwargs
+
+        def index_local_docs(self) -> int:
+            return 4
+
+    def fail_llm_client(**kwargs):
+        raise AssertionError("rag-index-docs should not create an LLM client")
+
+    monkeypatch.setattr(main_module, "load_config", lambda _: config)
+    monkeypatch.setattr(main_module, "KnowledgeService", FakeKnowledgeService)
+    monkeypatch.setattr(main_module, "OpenAICompatibleClient", fail_llm_client)
+
+    exit_code = main(["rag-index-docs"])
+
+    assert exit_code == 0
+    assert created["knowledge_service"]["config"] is config

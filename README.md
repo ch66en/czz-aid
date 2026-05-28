@@ -140,6 +140,20 @@ agent/reflection/reflection_subagent.py # Review 后反思
 ```bash
 pip install -r requirements.txt
 python -m agent.main watch  //启动监听
+
+python -m agent.main rag-index-skills   //触发rag建索引
+
+python -m agent.main rag-search   //搜索top3的skill块
+  --query "java.lang.NoSuchElementException OrderService firstItemId" 
+  --project mall-service 
+  --top-k 3
+
+python -m agent.main rag-index-docs   //查业务文件
+
+python -m agent.main rag-search-docs   //搜索top5的业务文件块
+  --query "NoSuchElementException firstItemId order module" 
+  --project mall-service `
+  --top-k 5
 ```
 
 默认测试命令：

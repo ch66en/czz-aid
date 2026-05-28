@@ -1,16 +1,18 @@
 env: dev
-workspace: .
+# Runtime workspace. RAG scans skills/ and docs/ under this directory.
+workspace: E:/Project/mall-service
 project:
-  name: demo-service
-  root: .
+  name: mall-service
+  root: E:/Project/mall-service
   language: java
   default_branch: master
   test_command: 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
   lint_command: ""  # 示例: "javac -Xlint:all -d /tmp/auto-fix-lint {file}"
 llm:
+  provider: doubao
   base_url: https://api.openai.com/v1
   api_key: your-api-key
-  model:
+  model: your-model-name
   timeout_seconds: 60
   # 备用 LLM：主 LLM 调用失败时自动切换
   # fallback_provider: deepseek
@@ -27,6 +29,29 @@ feishu:
   app_id: ""
   app_secret: ""
   approval_chat_id: ""
+  review_callback_mode: local
+  review_callback_host: 127.0.0.1
+  review_callback_port: 8765
+  review_callback_base_url: http://127.0.0.1:8765
+feishu_knowledge:
+  enabled: false
+  app_id: ""
+  app_secret: ""
+  # Recommended mode: sync all readable docs under one or more Feishu wiki spaces.
+  wiki_space_ids:
+    - "replace-with-feishu-wiki-space-id"
+  sync_interval_minutes: 60
+  base_url: https://open.feishu.cn/open-apis
+rag:
+  enabled: true
+  backend: sqlite
+  db_path: ./data/sessions/agent.db
+  top_k_skills: 3
+  min_score: 0.25
+  embedding_provider: fallback
+  embedding_base_url: ""
+  embedding_api_key: ""
+  embedding_model: ""
 session:
   backend: sqlite
   root_dir: ./data/sessions

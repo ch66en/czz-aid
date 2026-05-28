@@ -3,6 +3,7 @@ from __future__ import annotations
 """提供命令行入口并装配系统组件。"""
 
 import argparse
+import json
 from pathlib import Path
 from typing import Sequence
 
@@ -19,6 +20,8 @@ from agent.ingestion.review_callback_server import ReviewCallbackServer
 from agent.ingestion.sanitizer import Sanitizer
 from agent.ingestion.traceback_parser import TracebackParser
 from agent.llm.openai_compatible_client import OpenAICompatibleClient
+from agent.rag.knowledge_service import KnowledgeService
+from agent.rag.local_doc_loader import LOCAL_DOC_TYPES
 from agent.reflection.reflection_subagent import ReflectionSubAgent
 from agent.storage.session_store import SessionStore, SQLiteSessionStore
 from agent.storage.skill_store import SkillStore
@@ -48,6 +51,24 @@ def build_parser() -> argparse.ArgumentParser:
     reflect_parser = subparsers.add_parser("reflect")
     reflect_parser.add_argument("--bug-id", required=True)
     reflect_parser.add_argument("--result", required=True, choices=["pass", "fail"])
+
+    subparsers.add_parser("rag-index-skills")
+    subparsers.add_parser("rag-index-docs")
+    subparsers.add_parser("rag-sync-feishu")
+
+    rag_search_parser = subparsers.add_parser("rag-search")
+    rag_search_parser.add_argument("--query", required=True)
+    rag_search_parser.add_argument("--project", default="")
+    rag_search_parser.add_argument("--doc-type", default="skill")
+    rag_search_parser.add_argument("--top-k", type=int, default=3)
+    rag_search_parser.add_argument("--min-score", type=float, default=0.0)
+
+    rag_search_docs_parser = subparsers.add_parser("rag-search-docs")
+    rag_search_docs_parser.add_argument("--query", required=True)
+    rag_search_docs_parser.add_argument("--project", default="")
+    rag_search_docs_parser.add_argument("--doc-type", default="")
+    rag_search_docs_parser.add_argument("--top-k", type=int, default=5)
+    rag_search_docs_parser.add_argument("--min-score", type=float, default=0.0)
 
     return parser
 
@@ -100,6 +121,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     loaded_skills = skill_store.load_from_disk()
     if loaded_skills:
         info(f"Loaded {loaded_skills} skill(s) from {skills_dir}")
+    knowledge_service = KnowledgeService(config=config, skills_dir=skills_dir)
+
+    if args.command == "rag-index-skills":
+        indexed = knowledge_service.index_skills()
+        print(json.dumps({"indexed": indexed}, ensure_ascii=False))
+        return 0
+    if args.command == "rag-index-docs":
+        indexed = knowledge_service.index_local_docs()
+        print(json.dumps({"indexed": indexed}, ensure_ascii=False))
+        return 0
+    if args.command == "rag-sync-feishu":
+        result = knowledge_service.sync_feishu_docs()
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    if config.rag.enabled:
+        indexed_skills = knowledge_service.index_skills()
+        if indexed_skills:
+            info(f"Indexed {indexed_skills} skill document(s) into RAG")
+        indexed_docs = knowledge_service.index_local_docs()
+        if indexed_docs:
+            info(f"Indexed {indexed_docs} local doc(s) into RAG")
+        if config.feishu_knowledge.enabled:
+            feishu_sync = knowledge_service.sync_feishu_docs()
+            if feishu_sync.get("indexed"):
+                info(f"Synced {feishu_sync['indexed']} Feishu knowledge doc(s) into RAG")
+    if args.command == "rag-search":
+        results = knowledge_service.retriever.retrieve(
+            query=args.query,
+            project=args.project or config.project.name,
+            doc_type=args.doc_type or None,
+            top_k=args.top_k,
+            min_score=args.min_score,
+        )
+        print(json.dumps({"results": [item.model_dump(mode="json") for item in results]}, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "rag-search-docs":
+        doc_type = args.doc_type or LOCAL_DOC_TYPES
+        results = knowledge_service.retriever.retrieve(
+            query=args.query,
+            project=args.project or config.project.name,
+            doc_type=doc_type,
+            top_k=args.top_k,
+            min_score=args.min_score,
+        )
+        print(json.dumps({"results": [item.model_dump(mode="json") for item in results]}, ensure_ascii=False, indent=2))
+        return 0
+
     task_manager = TaskManager(task_store=task_store)
     llm_client = OpenAICompatibleClient(config=config) if config.llm.api_key.strip() else None
     if llm_client is not None:
@@ -112,6 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         session_store=session_store,
         skill_store=skill_store,
         llm_client=llm_client,
+        knowledge_service=knowledge_service if config.rag.enabled else None,
     )
     dedup_engine = DedupEngine(store=dedup_store)
     pipeline = IngestionPipeline(session_store=session_store, dedup_engine=dedup_engine, sanitizer=Sanitizer(), traceback_parser=TracebackParser(), repair_agent=repair_agent)

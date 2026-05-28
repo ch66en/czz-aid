@@ -58,6 +58,17 @@ class FeishuConfig(BaseModel):
     review_callback_base_url: str = "http://127.0.0.1:8765"
 
 
+class FeishuKnowledgeConfig(BaseModel):
+    """Configure Feishu OpenAPI as a knowledge source for local RAG sync."""
+
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+    wiki_space_ids: list[str] = Field(default_factory=list)
+    sync_interval_minutes: int = 60
+    base_url: str = "https://open.feishu.cn/open-apis"
+
+
 class SessionConfig(BaseModel):
     """定义会话、状态与产物存储配置。"""
 
@@ -78,6 +89,20 @@ class AgentConfig(BaseModel):
     debug: bool = False
 
 
+class RagConfig(BaseModel):
+    """Configure local RAG indexing and retrieval."""
+
+    enabled: bool = True
+    backend: str = "sqlite"
+    db_path: str = "./data/sessions/agent.db"
+    top_k_skills: int = 3
+    min_score: float = 0.25
+    embedding_provider: str = "fallback"
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
+
+
 class AppConfig(BaseModel):
     """聚合系统运行所需的全部配置分组。"""
 
@@ -87,8 +112,10 @@ class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     gitee: GiteeConfig = Field(default_factory=GiteeConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    feishu_knowledge: FeishuKnowledgeConfig = Field(default_factory=FeishuKnowledgeConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    rag: RagConfig = Field(default_factory=RagConfig)
 
 
 def load_config(path: str) -> AppConfig:
