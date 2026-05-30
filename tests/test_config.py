@@ -44,6 +44,14 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
               backend: sqlite
               root_dir: /tmp/sessions
               db_path: /tmp/sessions/agent.db
+            session_memory:
+              enabled: true
+              async_enabled: false
+              max_summary_chars: 8000
+            context_compact:
+              context_window_tokens: 1000000
+              reserved_output_tokens: 64000
+              auto_ratio: 0.85
             agent:
               max_retry: 5
               watch_paths:
@@ -67,5 +75,11 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
     assert config.session.backend == "sqlite"
     assert config.session.root_dir == "/tmp/sessions"
     assert config.session.db_path == "/tmp/sessions/agent.db"
+    assert config.session_memory.enabled is True
+    assert config.session_memory.async_enabled is False
+    assert config.session_memory.max_summary_chars == 8000
+    assert config.context_compact.context_window_tokens == 1000000
+    assert config.context_compact.reserved_output_tokens == 64000
+    assert config.context_compact.auto_ratio == 0.85
     assert config.agent.max_retry == 5
     assert config.agent.watch_paths == ["./runtime/logs"]

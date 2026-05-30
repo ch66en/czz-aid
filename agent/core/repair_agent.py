@@ -21,6 +21,8 @@ from agent.ingestion.sanitizer import Sanitizer
 from agent.llm.openai_compatible_client import OpenAICompatibleClient
 from agent.models import BugEvent, RepairTask, TaskStatus, ToolResult, ToolSpec
 from agent.rag.knowledge_service import KnowledgeService
+from agent.session_memory import ContextCompactor, MemoryUpdateEvent, SessionMemoryAgent, SessionMemoryStore
+from agent.session_memory.compressor import ToolResultCompressor
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.tools.base import PermissionType
@@ -77,6 +79,10 @@ class RepairAgent:
         self.llm_client = llm_client
         self.knowledge_service = knowledge_service
         self.sanitizer = Sanitizer()
+        self.session_memory_store = SessionMemoryStore(config)
+        self.session_memory_agent = SessionMemoryAgent(config, self.session_memory_store, self.sanitizer)
+        self.context_compactor = ContextCompactor(config, self.session_memory_store)
+        self.tool_result_compressor = ToolResultCompressor(config)
         self._ensure_core_tools()
         apply_test_patch_tool = self.registry.get("apply_test_patch")
         self.test_generation_agent = TestGenerationAgent(
@@ -154,6 +160,8 @@ class RepairAgent:
         bug_event = self._load_bug_event(bug_id)
         self._save_bug_event(bug_event)
         session = self._load_session(bug_id)
+        if self.config.session_memory.enabled:
+            session["session_memory_path"] = self.session_memory_agent.ensure(bug_id)
         frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
         if frame_contexts:
             session = {**session, "frame_contexts": frame_contexts}
@@ -175,6 +183,7 @@ class RepairAgent:
                 spinner = ui.Spinner("Thinking")
                 spinner.start()
                 try:
+                    self._compact_messages_if_needed(bug_id, llm_messages, history, session)
                     action = self._ask_llm(llm_messages, history, bug_event, session)
                 finally:
                     spinner.stop()
@@ -202,6 +211,7 @@ class RepairAgent:
                         }
                     )
                     self._append_tool_result_message(llm_messages, action, last_result)
+                    self._enqueue_memory_update(bug_event, session, action, last_result, history, llm_messages, event_type="invalid_llm_output")
                     invalid_output_retries += 1
                     if invalid_output_retries <= 2:
                         ui.warning("Invalid LLM output rejected; requesting native tool_call again")
@@ -221,6 +231,7 @@ class RepairAgent:
                             }
                         )
                         self._append_tool_result_message(llm_messages, action, last_result)
+                        self._enqueue_memory_update(bug_event, session, action, last_result, history, llm_messages, event_type="finish_patch_rejected")
                         finish_without_patch_rejections += 1
                         if finish_without_patch_rejections <= 2:
                             ui.warning("finish_patch rejected: no successful edit_code")
@@ -230,30 +241,35 @@ class RepairAgent:
                     history.append({"tool": "RunCompileTool", "result": compile_result.model_dump()})
                     session["compile_result"] = compile_result.model_dump()
                     self._save_session(bug_id, session)
+                    self._enqueue_runtime_update(bug_event, session, "run_compile", compile_result, history, llm_messages)
                     ui.compile_result(compile_result.success, compile_result.exit_code)
                     if not compile_result.success:
                         rollback_result = self._rollback_git_changes(history, bug_event)
                         history.append({"tool": "Rollback", "result": rollback_result.model_dump()})
                         session["rollback_result"] = rollback_result.model_dump()
                         self._save_session(bug_id, session)
+                        self._enqueue_runtime_update(bug_event, session, "rollback", rollback_result, history, llm_messages)
                         last_result = compile_result
                         break
                     test_result = self._run_test()
                     history.append({"tool": "RunTestTool", "result": test_result.model_dump()})
                     session["test_result"] = test_result.model_dump()
                     self._save_session(bug_id, session)
+                    self._enqueue_runtime_update(bug_event, session, "run_test", test_result, history, llm_messages)
                     ui.test_result(test_result.success, test_result.exit_code)
                     if not test_result.success:
                         rollback_result = self._rollback_git_changes(history, bug_event)
                         history.append({"tool": "Rollback", "result": rollback_result.model_dump()})
                         session["rollback_result"] = rollback_result.model_dump()
                         self._save_session(bug_id, session)
+                        self._enqueue_runtime_update(bug_event, session, "rollback", rollback_result, history, llm_messages)
                         last_result = test_result
                         break
                     pr_result = self._create_pr(task, bug_event, history)
                     history.append({"tool": "CreatePR", "result": pr_result.model_dump()})
                     session["create_pr_result"] = pr_result.model_dump()
                     self._save_session(bug_id, session)
+                    self._enqueue_runtime_update(bug_event, session, "create_pr", pr_result, history, llm_messages)
                     if not pr_result.success:
                         last_result = pr_result
                         self.task_manager.update_status(bug_id, TaskStatus.FAILED)
@@ -295,6 +311,7 @@ class RepairAgent:
                     self._append_session_tool_call(session, action, last_result)
                     self._save_session(bug_id, session)
                     self._append_tool_result_message(llm_messages, action, last_result)
+                    self._enqueue_memory_update(bug_event, session, action, last_result, history, llm_messages)
                     continue
 
                 arguments = self._prepare_tool_arguments(tool.spec.name, action.get("arguments", {}), bug_event)
@@ -320,6 +337,7 @@ class RepairAgent:
                     self._notify_whitelist_denial(bug_event, session, denied_entry)
                     ui.denied(tool.spec.name, reason)
                     self._append_tool_result_message(llm_messages, action, last_result)
+                    self._enqueue_memory_update(bug_event, session, action, last_result, history, llm_messages)
                     continue
 
                 result = tool.run(arguments)
@@ -329,6 +347,7 @@ class RepairAgent:
                 self._append_session_tool_call(session, action, result)
                 self._save_session(bug_id, session)
                 self._append_tool_result_message(llm_messages, action, result)
+                self._enqueue_memory_update(bug_event, session, action, result, history, llm_messages)
                 if result.success:
                     ui.success(f"{tool.spec.name}  exit_code={result.exit_code}")
                 else:
@@ -395,12 +414,80 @@ class RepairAgent:
 
     def _save_session(self, bug_id: str, session: dict[str, Any]) -> None:
         """保存脱敏后的会话上下文。"""
+        session["session_revision"] = int(session.get("session_revision") or 0) + 1
         sanitized_session = json.loads(self.sanitizer.sanitize(json.dumps(session, ensure_ascii=False)))
         self.session_store.put(bug_id, sanitized_session)
 
     def _save_bug_event(self, bug_event: BugEvent) -> None:
         """把 BugEvent 写入会话存储，供后续轮次读取。"""
         self.session_store.put(f"bug_event:{bug_event.bug_id}", bug_event.model_dump())
+
+    def _compact_messages_if_needed(self, bug_id: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], session: dict[str, Any]) -> None:
+        """Compact LLM messages before a call when token usage crosses the configured threshold."""
+        try:
+            result = self.context_compactor.compact_if_needed(bug_id, messages, history)
+        except Exception as exc:
+            session["context_compact_error"] = str(exc)
+            self._save_session(bug_id, session)
+            ui.warning(f"Context compact skipped  error={exc}")
+            return
+        if not result.compacted:
+            return
+        messages[:] = result.messages
+        session["context_compaction"] = result.model_dump(mode="json", exclude={"messages"})
+        self._save_session(bug_id, session)
+        ui.info(f"Context compacted  before={result.tokens_before} after={result.tokens_after}")
+
+    def _enqueue_memory_update(
+        self,
+        bug_event: BugEvent,
+        session: dict[str, Any],
+        action: dict[str, Any],
+        result: ToolResult,
+        history: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        *,
+        event_type: str = "tool_result",
+    ) -> None:
+        """Queue a post-tool-result session memory update."""
+        if not self.config.session_memory.enabled:
+            return
+        try:
+            arguments = action.get("arguments", {}) if isinstance(action.get("arguments", {}), dict) else {}
+            event = MemoryUpdateEvent(
+                bug_id=bug_event.bug_id,
+                event_type=event_type,
+                tool_call_index=len(session.get("tool_calls", [])) if isinstance(session.get("tool_calls"), list) else 0,
+                message_index=len(messages),
+                history_index=len(history),
+                session_revision=int(session.get("session_revision") or 0),
+                tool=str(action.get("tool") or result.tool),
+                reason=str(action.get("reason") or ""),
+                arguments=self.tool_result_compressor.compress_arguments(arguments),
+                result=self.tool_result_compressor.compress_result(result),
+                session_status=self._memory_session_status(session),
+            )
+            self.session_memory_agent.enqueue(event)
+        except Exception as exc:
+            session["session_memory_error"] = str(exc)
+            self._save_session(bug_event.bug_id, session)
+            ui.warning(f"Session memory update skipped  error={exc}")
+
+    def _enqueue_runtime_update(
+        self,
+        bug_event: BugEvent,
+        session: dict[str, Any],
+        tool_name: str,
+        result: ToolResult,
+        history: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+    ) -> None:
+        action = {"tool": tool_name, "arguments": {}, "reason": "runtime step", "tool_call_id": ""}
+        self._enqueue_memory_update(bug_event, session, action, result, history, messages, event_type="runtime_tool")
+
+    def _memory_session_status(self, session: dict[str, Any]) -> dict[str, Any]:
+        keys = ["status", "agent_branch", "base_branch", "pr_url", "session_revision"]
+        return {key: session.get(key) for key in keys if session.get(key) not in (None, "")}
 
     def _serialize_retrieved_skills(self, skills: list[Any]) -> list[Any]:
         serialized: list[Any] = []

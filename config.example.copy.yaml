@@ -57,6 +57,23 @@ session:
   root_dir: ./data/sessions
   db_path: ./data/sessions/agent.db
   retention_days: 7
+session_memory:
+  enabled: true
+  # Defaults to session.root_dir when empty.
+  root_dir: ""
+  async_enabled: true
+  max_summary_chars: 12000
+  max_event_chars: 6000
+  max_field_chars: 1200
+context_compact:
+  enabled: true
+  # Model context window; used only as threshold reference.
+  context_window_tokens: 1000000
+  reserved_output_tokens: 64000
+  warning_ratio: 0.70
+  auto_ratio: 0.85
+  hard_ratio: 0.93
+  keep_recent_tool_pairs: 6
 agent:
   name: auto-fix-agent
   max_retry: 3

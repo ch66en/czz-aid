@@ -78,6 +78,29 @@ class SessionConfig(BaseModel):
     retention_days: int = 7
 
 
+class SessionMemoryConfig(BaseModel):
+    """Configure per-bug session memory summary updates."""
+
+    enabled: bool = True
+    root_dir: str = ""
+    async_enabled: bool = True
+    max_summary_chars: int = 12000
+    max_event_chars: int = 6000
+    max_field_chars: int = 1200
+
+
+class ContextCompactConfig(BaseModel):
+    """Configure prompt compaction thresholds and recent-message retention."""
+
+    enabled: bool = True
+    context_window_tokens: int = 1_000_000
+    reserved_output_tokens: int = 64_000
+    warning_ratio: float = 0.70
+    auto_ratio: float = 0.85
+    hard_ratio: float = 0.93
+    keep_recent_tool_pairs: int = 6
+
+
 class AgentConfig(BaseModel):
     """定义代理运行策略配置。"""
 
@@ -114,6 +137,8 @@ class AppConfig(BaseModel):
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
     feishu_knowledge: FeishuKnowledgeConfig = Field(default_factory=FeishuKnowledgeConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
+    session_memory: SessionMemoryConfig = Field(default_factory=SessionMemoryConfig)
+    context_compact: ContextCompactConfig = Field(default_factory=ContextCompactConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     rag: RagConfig = Field(default_factory=RagConfig)
 
