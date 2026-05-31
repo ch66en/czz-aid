@@ -75,6 +75,25 @@ def test_llm_client_forwards_json_response_format() -> None:
     assert client.client.chat.completions.last_kwargs["response_format"] == {"type": "json_object"}
 
 
+def test_llm_client_forwards_max_tokens_and_returns_usage() -> None:
+    """Compact 摘要应能限制输出长度，并读取真实 token usage。"""
+    usage = SimpleNamespace(
+        prompt_tokens=12,
+        completion_tokens=3,
+        total_tokens=15,
+        model_dump=lambda: {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))], usage=usage)
+    config = AppConfig(llm={"api_key": "test", "base_url": "https://api.openai.com/v1"})
+    client = OpenAICompatibleClient(config=config, client=FakeClient(response))
+
+    result = client.chat([{"role": "user", "content": "summarize"}], max_tokens=6000)
+
+    assert client.client.chat.completions.last_kwargs["max_tokens"] == 6000
+    assert result.data["token_usage"]["prompt_tokens"] == 12
+    assert result.data["token_usage"]["completion_tokens"] == 3
+
+
 def test_llm_client_extracts_native_tool_calls() -> None:
     tool_call = SimpleNamespace(
         id="call-1",

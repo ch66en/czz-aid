@@ -7,7 +7,7 @@ from agent.core.permission_guard import PermissionGuard
 from agent.core.repair_agent import RepairAgent
 from agent.core.task_manager import TaskManager
 from agent.core.tool_registry import ToolRegistry
-from agent.models import BugEvent, RepairTask, StackFrame, ToolResult
+from agent.models import BugEvent, LegacyCompactionResult, RepairTask, StackFrame, ToolResult
 from agent.rag.models import RetrievalResult
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
@@ -77,6 +77,25 @@ class NativeToolCallLLM:
         )
 
 
+class FailIfCalledLLM:
+    """用于验证 compact 阻断后主 LLM 不会继续调用。"""
+
+    def chat(self, messages, tools=None, tool_choice=None):
+        raise AssertionError("main LLM should not be called after compact blocks")
+
+
+class BlockingCompactor:
+    """模拟达到硬阈值后无法恢复的 compact 结果。"""
+
+    def compact_if_needed(self, **_kwargs):
+        return LegacyCompactionResult(
+            blocked=True,
+            reason="blocking_threshold_after_compact",
+            tokens_before=128000,
+            tokens_after=125000,
+        )
+
+
 class FakeKnowledgeService:
     def retrieve_skills_for_bug(self, bug_event: BugEvent, top_k: int = 3):
         return [
@@ -139,6 +158,25 @@ def test_repair_agent_builds_prompt_template() -> None:
     assert "skills" not in payload
     assert "frame_contexts" not in payload["session"]
     assert "tools" not in payload
+
+
+def test_repair_agent_prompt_excludes_full_session_tool_calls() -> None:
+    """恢复旧任务时，不应把完整审计日志再次塞入系统提示词。"""
+    agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+    bug_event = BugEvent(bug_id="BUG-SLIM", source="log", project="demo", title="t", exception_type="E", message="m", fingerprint="fp")
+    session = {
+        "status": "running",
+        "last_error": {"tool": "run_test", "stderr_summary": "failed"},
+        "tool_calls": [{"name": "read_code", "result": {"data": {"content": "very large audit payload"}}}],
+        "feishu_help_payload": {"secret": "do-not-inject"},
+    }
+
+    payload = json.loads(agent.build_prompt_template(bug_event, [], session))
+
+    assert payload["session"]["status"] == "running"
+    assert payload["session"]["last_error"]["tool"] == "run_test"
+    assert "tool_calls" not in payload["session"]
+    assert "feishu_help_payload" not in payload["session"]
 
 
 def test_repair_agent_uses_retrieved_skills_not_all_skills() -> None:
@@ -222,15 +260,16 @@ def test_repair_agent_converts_tools_to_openai_function_specs() -> None:
     assert search_project_doc["function"]["parameters"]["required"] == ["query", "project"]
 
 
-def test_repair_agent_uses_native_tool_call_message_history() -> None:
+def test_repair_agent_uses_native_tool_call_message_history(tmp_path: Path) -> None:
     llm = NativeToolCallLLM()
-    agent = RepairAgent(AppConfig(), ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore(), llm_client=llm)
+    config = AppConfig(session={"root_dir": str(tmp_path / "sessions")})
+    agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore(), llm_client=llm)
     bug_event = BugEvent(bug_id="BUG-1", source="log", project="demo", title="t", exception_type="E", message="m", fingerprint="fp")
     messages = [{"role": "system", "content": "{}"}]
 
     action = agent._ask_llm(messages, [], bug_event, {})
     result = ToolResult(tool="read_code", success=True, exit_code=0, stdout_summary="ok")
-    agent._append_tool_result_message(messages, action, result)
+    agent._append_tool_result_message(messages, action, result, bug_id=bug_event.bug_id)
 
     assert llm.last_tool_choice == "auto"
     assert llm.last_tools is not None
@@ -240,6 +279,45 @@ def test_repair_agent_uses_native_tool_call_message_history() -> None:
     assert messages[-2]["tool_calls"][0]["id"] == "call-read-1"
     assert messages[-1]["role"] == "tool"
     assert messages[-1]["tool_call_id"] == "call-read-1"
+    transcript_path = agent.compact_transcript.path_for(bug_event.bug_id)
+    transcript = transcript_path.read_text(encoding="utf-8")
+    assert '"source": "assistant"' in transcript
+    assert '"source": "tool"' in transcript
+    assert "call-read-1" in transcript
+
+
+def test_repair_agent_stops_before_main_llm_when_compact_blocks() -> None:
+    """Compact 达到硬阈值后应直接失败，不能继续请求主模型。"""
+    session_store = SessionStore()
+    session_store.put(
+        "bug_event:BUG-BLOCK",
+        BugEvent(
+            bug_id="BUG-BLOCK",
+            source="log",
+            project="demo",
+            title="context overflow",
+            exception_type="ContextOverflow",
+            message="too large",
+            fingerprint="fp",
+        ).model_dump(),
+    )
+    agent = RepairAgent(
+        AppConfig(),
+        ToolRegistry(),
+        PermissionGuard(),
+        TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)),
+        session_store,
+        SkillStore(),
+        llm_client=FailIfCalledLLM(),  # type: ignore[arg-type]
+    )
+    agent.legacy_compactor = BlockingCompactor()  # type: ignore[assignment]
+
+    result = agent.repair("BUG-BLOCK")
+
+    assert result.success is False
+    assert result.last_result is not None
+    assert result.last_result.tool == "legacy_full_compact"
+    assert session_store.get("BUG-BLOCK")["last_error"]["tool"] == "legacy_full_compact"
 
 
 def test_repair_agent_defaults_search_code_root_to_bug_project_root(tmp_path: Path) -> None:

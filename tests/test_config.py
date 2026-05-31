@@ -15,6 +15,9 @@ def test_load_config_returns_defaults_when_file_missing(tmp_path: Path) -> None:
     assert config.project.test_command == 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
     assert config.session.backend == "sqlite"
     assert config.agent.max_retry == 3
+    assert config.compact.enabled is True
+    assert config.compact.context_window_tokens == 1_000_000
+    assert config.compact.keep_recent_rounds == 8
 
 
 def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
@@ -33,6 +36,10 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
             llm:
               model: gpt-5.2-codex-compatible
               api_key: test-key
+            compact:
+              enabled: false
+              context_window_tokens: 64000
+              keep_recent_rounds: 2
             gitee:
               owner: demo
               repo: auto-fix-agent
@@ -60,6 +67,9 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
     assert config.project.name == "order-service"
     assert config.project.default_branch == "release"
     assert config.llm.api_key == "test-key"
+    assert config.compact.enabled is False
+    assert config.compact.context_window_tokens == 64000
+    assert config.compact.keep_recent_rounds == 2
     assert config.gitee.repo == "auto-fix-agent"
     assert config.feishu.webhook == "https://open.feishu.cn/webhook"
     assert config.feishu.review_callback_mode == "local"

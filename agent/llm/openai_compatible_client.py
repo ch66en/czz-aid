@@ -77,18 +77,19 @@ class OpenAICompatibleClient:
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        max_tokens: int | None = None,
     ) -> ToolResult:
         """向兼容接口模型发起聊天请求，主 LLM 失败时自动尝试备用 LLM。"""
         start = time.perf_counter()
         model = self.router.choose_model()
-        request_kwargs = self._build_request_kwargs(model, messages, tools, response_format, tool_choice)
+        request_kwargs = self._build_request_kwargs(model, messages, tools, response_format, tool_choice, max_tokens)
         try:
             response = self.client.chat.completions.create(**request_kwargs)
         except Exception as primary_exc:
             if self.fallback_client is None:
                 return self._failure_result(model, messages, tools, start, primary_exc)
             fallback_model = self.router.choose_fallback_model()
-            fallback_kwargs = self._build_request_kwargs(fallback_model, messages, tools, response_format, tool_choice)
+            fallback_kwargs = self._build_request_kwargs(fallback_model, messages, tools, response_format, tool_choice, max_tokens)
             try:
                 response = self.fallback_client.chat.completions.create(**fallback_kwargs)
             except Exception as fallback_exc:
@@ -103,6 +104,7 @@ class OpenAICompatibleClient:
         tools: list[dict[str, Any]] | None,
         response_format: dict[str, Any] | None,
         tool_choice: str | dict[str, Any] | None,
+        max_tokens: int | None,
     ) -> dict[str, Any]:
         """构建 OpenAI API 请求参数。"""
         kwargs: dict[str, Any] = {
@@ -115,6 +117,9 @@ class OpenAICompatibleClient:
             kwargs["response_format"] = response_format
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
+        if max_tokens is not None:
+            # Compact 摘要必须限制输出长度，为输入上下文预留确定的窗口空间。
+            kwargs["max_tokens"] = max_tokens
         return kwargs
 
     def _failure_result(
@@ -172,7 +177,15 @@ class OpenAICompatibleClient:
         )
         artifact_path = self._persist_call_record(model=model, messages=messages, tools=tools, content=content, tool_calls=tool_calls, token_usage=token_usage, latency_ms=latency_ms)
         self.records.append(record)
-        data: dict[str, Any] = {"model": model, "summary": record.summary, "content": content, "tool_calls": tool_calls, "artifact_path": str(artifact_path)}
+        data: dict[str, Any] = {
+            "model": model,
+            "summary": record.summary,
+            "content": content,
+            "tool_calls": tool_calls,
+            "artifact_path": str(artifact_path),
+            # 将 usage 同时放入返回值，压缩器无需读取客户端内部 records。
+            "token_usage": token_usage,
+        }
         if fallback_used:
             data["fallback_used"] = True
         return ToolResult(

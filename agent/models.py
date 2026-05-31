@@ -116,6 +116,38 @@ class ToolResult(BaseModel):
     artifacts: list[str] = Field(default_factory=list)
 
 
+class LegacyCompactionState(BaseModel):
+    """记录一次修复任务中的 Legacy Full Compact 运行状态。"""
+
+    compact_count: int = 0
+    consecutive_failures: int = 0
+    tokens_before: int = 0
+    tokens_after: int = 0
+    last_summary_path: str = ""
+    last_transcript_path: str = ""
+    last_error: str = ""
+    last_compacted_at: datetime | None = None
+
+
+class LegacyCompactionResult(BaseModel):
+    """描述一次 compact 检查或执行的结果。"""
+
+    compacted: bool = False
+    blocked: bool = False
+    reason: str = ""
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    tokens_before: int = 0
+    tokens_after: int = 0
+    dropped_round_count: int = 0
+    dropped_message_count: int = 0
+    restored_file_count: int = 0
+    ptl_retry_count: int = 0
+    summary_input_tokens: int = 0
+    summary_output_tokens: int = 0
+    summary_path: str = ""
+    transcript_path: str = ""
+
+
 class ReviewEvent(BaseModel):
     """表示一次人工审核或自动审核事件。"""
 

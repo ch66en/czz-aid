@@ -19,6 +19,19 @@ llm:
   # fallback_base_url: ""
   # fallback_api_key: sk-your-fallback-key
   # fallback_model: deepseek-chat
+compact:
+  # Legacy Full Compact：接近模型上下文上限时，用摘要替换较早消息。
+  enabled: true
+  context_window_tokens: 1000000
+  summary_max_output_tokens: 20000
+  normal_output_reserve_tokens: 40000
+  buffer_tokens: 100000
+  max_ptl_retries: 3
+  max_consecutive_failures: 3
+  keep_recent_rounds: 8
+  restore_max_files: 8
+  restore_max_chars_per_file: 16000
+  restore_total_chars: 80000
 gitee:
   base_url: https://gitee.com/api/v5
   token: your-gitee-token

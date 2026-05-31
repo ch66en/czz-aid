@@ -36,6 +36,27 @@ class LLMConfig(BaseModel):
     fallback_model: str = ""
 
 
+class CompactConfig(BaseModel):
+    """定义 Legacy Full Compact 的触发阈值和上下文恢复预算。"""
+
+    enabled: bool = True
+    # 不同 OpenAI-compatible 供应商的模型命名不统一，因此窗口大小必须显式配置。
+    context_window_tokens: int = 1_000_000
+    # 摘要请求需要预留输出空间，否则 compact 请求自身也可能超过模型窗口。
+    summary_max_output_tokens: int = 20_000
+    # 主修复请求仍要为模型的下一步工具调用和解释预留输出空间。
+    normal_output_reserve_tokens: int = 40_000
+    # 在真正达到模型极限前提前 compact，为估算误差和工具 schema 留出余量。
+    buffer_tokens: int = 100_000
+    max_ptl_retries: int = 3
+    max_consecutive_failures: int = 3
+    # 最近轮次按完整 assistant(tool_calls) -> tool(result) 组合保留。
+    keep_recent_rounds: int = 8
+    restore_max_files: int = 8
+    restore_max_chars_per_file: int = 16_000
+    restore_total_chars: int = 80_000
+
+
 class GiteeConfig(BaseModel):
     """定义 Gitee 集成所需配置。"""
 
@@ -110,6 +131,7 @@ class AppConfig(BaseModel):
     workspace: str = "."
     project: ProjectConfig = Field(default_factory=ProjectConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    compact: CompactConfig = Field(default_factory=CompactConfig)
     gitee: GiteeConfig = Field(default_factory=GiteeConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
     feishu_knowledge: FeishuKnowledgeConfig = Field(default_factory=FeishuKnowledgeConfig)

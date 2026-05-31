@@ -13,6 +13,8 @@ from urllib.parse import urlencode, urlparse
 import requests
 
 from agent.config import AppConfig
+from agent.core.compact_transcript import CompactTranscript
+from agent.core.legacy_full_compactor import LegacyFullCompactor
 from agent.core.permission_guard import PermissionGuard
 from agent.core.test_generation_agent import TestGenerationAgent
 from agent.core.task_manager import TaskManager
@@ -77,6 +79,13 @@ class RepairAgent:
         self.llm_client = llm_client
         self.knowledge_service = knowledge_service
         self.sanitizer = Sanitizer()
+        self.compact_transcript = CompactTranscript(config=config, sanitizer=self.sanitizer)
+        self.legacy_compactor = LegacyFullCompactor(
+            config=config,
+            llm_client=llm_client,
+            sanitizer=self.sanitizer,
+            transcript=self.compact_transcript,
+        )
         self._ensure_core_tools()
         apply_test_patch_tool = self.registry.get("apply_test_patch")
         self.test_generation_agent = TestGenerationAgent(
@@ -113,8 +122,9 @@ class RepairAgent:
     ) -> str:
         """构造修复代理系统提示词模板。"""
         frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
-        prompt_session = dict(session)
-        prompt_session.pop("frame_contexts", None)
+        # session["tool_calls"] 是完整审计日志，恢复旧任务时可能非常大。
+        # 系统提示词只注入继续修复所需的精简状态，完整记录仍保留在 SessionStore。
+        prompt_session = self._build_slim_session_view(session)
         bug_summary = bug_event.model_dump(exclude={"traceback"})
         bug_summary["traceback_omitted"] = bool(bug_event.traceback)
         prompt = {
@@ -162,6 +172,7 @@ class RepairAgent:
         prompt_template = self.build_prompt_template(bug_event, retrieved_skills, session, retrieved_project_docs)
         history: list[dict[str, Any]] = []
         llm_messages: list[dict[str, Any]] = [{"role": "system", "content": prompt_template}]
+        self._append_transcript_message(bug_id, llm_messages[0], source="repair_start", session=session)
         last_result: ToolResult | None = None
 
         ui.step(f"Starting repair  bug_id={bug_id}  exception={bug_event.exception_type}")
@@ -172,6 +183,55 @@ class RepairAgent:
             invalid_output_retries = 0
             finish_without_patch_rejections = 0
             while True:
+                # Compact 只收缩下一次主模型调用使用的 llm_messages。
+                # history 和 session["tool_calls"] 仍然完整保留，避免影响回滚、
+                # PR 文件收集以及后续人工审计。
+                compaction = self.legacy_compactor.compact_if_needed(
+                    bug_id=bug_id,
+                    messages=llm_messages,
+                    session=session,
+                    rebuilt_system_prompt=prompt_template,
+                    tools=self._openai_tools(),
+                )
+                if compaction.compacted:
+                    llm_messages[:] = compaction.messages
+                    self._save_session(bug_id, session)
+                    ui.info(
+                        "Legacy compact completed  "
+                        f"tokens={compaction.tokens_before}->{compaction.tokens_after}  "
+                        f"dropped_rounds={compaction.dropped_round_count}"
+                    )
+                elif compaction.reason not in {"disabled", "llm_unavailable", "below_threshold"}:
+                    # 失败状态也要持久化，使熔断器在下一轮工具调用后仍然生效。
+                    self._save_session(bug_id, session)
+                    ui.warning(f"Legacy compact skipped  reason={compaction.reason}")
+
+                if compaction.blocked:
+                    last_result = ToolResult(
+                        tool="legacy_full_compact",
+                        success=False,
+                        exit_code=1,
+                        stdout_summary="",
+                        stderr_summary=compaction.reason,
+                        data=compaction.model_dump(mode="json", exclude={"messages"}),
+                        artifacts=[],
+                    )
+                    history.append({"tool": "legacy_full_compact", "result": last_result.model_dump()})
+                    session["last_error"] = last_result.model_dump()
+                    self.task_manager.update_status(bug_id, TaskStatus.FAILED)
+                    self._save_session(bug_id, session)
+                    self._send_feishu_help(bug_event, session, last_result)
+                    ui.error(f"Legacy compact blocked main LLM call  reason={compaction.reason}")
+                    return RepairRunResult(
+                        False,
+                        "failed",
+                        "context compact failed at blocking threshold",
+                        task=task,
+                        last_result=last_result,
+                        prompt_template=prompt_template,
+                        history=history,
+                    )
+
                 spinner = ui.Spinner("Thinking")
                 spinner.start()
                 try:
@@ -201,7 +261,7 @@ class RepairAgent:
                             "feedback": "Rejected: native function call required. Use one available tool call, not prose.",
                         }
                     )
-                    self._append_tool_result_message(llm_messages, action, last_result)
+                    self._append_tool_result_message(llm_messages, action, last_result, bug_id=bug_id)
                     invalid_output_retries += 1
                     if invalid_output_retries <= 2:
                         ui.warning("Invalid LLM output rejected; requesting native tool_call again")
@@ -220,7 +280,7 @@ class RepairAgent:
                                 "feedback": "Rejected: finish_patch requires a successful edit_code in the current attempt. Use edit_code to produce a patch.",
                             }
                         )
-                        self._append_tool_result_message(llm_messages, action, last_result)
+                        self._append_tool_result_message(llm_messages, action, last_result, bug_id=bug_id)
                         finish_without_patch_rejections += 1
                         if finish_without_patch_rejections <= 2:
                             ui.warning("finish_patch rejected: no successful edit_code")
@@ -294,7 +354,7 @@ class RepairAgent:
                     session["last_error"] = last_result.model_dump()
                     self._append_session_tool_call(session, action, last_result)
                     self._save_session(bug_id, session)
-                    self._append_tool_result_message(llm_messages, action, last_result)
+                    self._append_tool_result_message(llm_messages, action, last_result, bug_id=bug_id)
                     continue
 
                 arguments = self._prepare_tool_arguments(tool.spec.name, action.get("arguments", {}), bug_event)
@@ -319,7 +379,7 @@ class RepairAgent:
                     self._save_session(bug_id, session)
                     self._notify_whitelist_denial(bug_event, session, denied_entry)
                     ui.denied(tool.spec.name, reason)
-                    self._append_tool_result_message(llm_messages, action, last_result)
+                    self._append_tool_result_message(llm_messages, action, last_result, bug_id=bug_id)
                     continue
 
                 result = tool.run(arguments)
@@ -328,7 +388,7 @@ class RepairAgent:
                 session["last_tool_result"] = result.model_dump()
                 self._append_session_tool_call(session, action, result)
                 self._save_session(bug_id, session)
-                self._append_tool_result_message(llm_messages, action, result)
+                self._append_tool_result_message(llm_messages, action, result, bug_id=bug_id)
                 if result.success:
                     ui.success(f"{tool.spec.name}  exit_code={result.exit_code}")
                 else:
@@ -411,6 +471,40 @@ class RepairAgent:
                 serialized.append(skill)
         return serialized
 
+    def _build_slim_session_view(self, session: dict[str, Any]) -> dict[str, Any]:
+        """提取系统提示词真正需要的 session 状态，避免重复注入完整审计历史。"""
+        keys = (
+            "status",
+            "last_error",
+            "last_tool_result",
+            "compile_result",
+            "test_result",
+            "rollback_result",
+            "test_generation_result",
+            "pr_url",
+            "agent_branch",
+            "base_branch",
+            "denied_commands",
+            "legacy_compaction_state",
+            "transcript_path",
+        )
+        slim: dict[str, Any] = {}
+        for key in keys:
+            value = session.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if key == "denied_commands" and isinstance(value, list):
+                value = value[-3:]
+            slim[key] = self._limit_prompt_value(value)
+        return slim
+
+    def _limit_prompt_value(self, value: Any, max_chars: int = 4_000) -> Any:
+        """限制单项状态大小；完整内容仍然保存在 session 审计数据中。"""
+        serialized = json.dumps(value, ensure_ascii=False, default=str)
+        if len(serialized) <= max_chars:
+            return value
+        return serialized[:max_chars] + "...[状态内容已截断]"
+
     def _retrieve_skills(self, bug_event: BugEvent) -> list[Any]:
         if self.knowledge_service is not None and self.config.rag.enabled:
             try:
@@ -463,11 +557,15 @@ class RepairAgent:
         content = response.data.get("content") if isinstance(response.data, dict) else ""
         if isinstance(tool_calls, list) and tool_calls:
             tool_call = tool_calls[0]
-            messages.append(self._assistant_tool_call_message(tool_call, str(content or "")))
+            message = self._assistant_tool_call_message(tool_call, str(content or ""))
+            messages.append(message)
+            self._append_transcript_message(bug_event.bug_id, message, source="assistant")
             return self._tool_call_to_action(tool_call)
         payload = content
         if isinstance(payload, str):
-            messages.append({"role": "assistant", "content": payload})
+            message = {"role": "assistant", "content": payload}
+            messages.append(message)
+            self._append_transcript_message(bug_event.bug_id, message, source="assistant")
             parsed_payload = self._parse_llm_action_payload(payload)
             if parsed_payload is None:
                 return self._invalid_llm_action("invalid llm output: expected a native function tool_call")
@@ -536,13 +634,43 @@ class RepairAgent:
         reason = str(arguments.get("reason") or arguments.get("evidence") or "native function call")
         return {"tool": name, "arguments": arguments, "reason": reason, "tool_call_id": str(tool_call.get("id") or "")}
 
-    def _append_tool_result_message(self, messages: list[dict[str, Any]], action: dict[str, Any], result: ToolResult) -> None:
+    def _append_tool_result_message(
+        self,
+        messages: list[dict[str, Any]],
+        action: dict[str, Any],
+        result: ToolResult,
+        *,
+        bug_id: str = "",
+    ) -> None:
         call_id = str(action.get("tool_call_id") or "")
         content = self._tool_result_content(result)
         if call_id:
-            messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
+            message = {"role": "tool", "tool_call_id": call_id, "content": content}
+            messages.append(message)
+            self._append_transcript_message(bug_id, message, source="tool")
             return
-        messages.append({"role": "user", "content": content})
+        message = {"role": "user", "content": content}
+        messages.append(message)
+        self._append_transcript_message(bug_id, message, source="tool")
+
+    def _append_transcript_message(
+        self,
+        bug_id: str,
+        message: dict[str, Any],
+        *,
+        source: str,
+        session: dict[str, Any] | None = None,
+    ) -> None:
+        """Best-effort transcript persistence must not interrupt a repair run."""
+        if not bug_id:
+            return
+        try:
+            path = self.compact_transcript.append_message(bug_id, message, source=source)
+        except OSError as exc:
+            ui.warning(f"Compact transcript append failed  error={exc}")
+            return
+        if session is not None:
+            session["transcript_path"] = str(path)
 
     def _tool_result_content(self, result: ToolResult) -> str:
         return json.dumps(result.model_dump(), ensure_ascii=False, default=str)
