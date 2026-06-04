@@ -8,7 +8,7 @@ from agent.core.repair_agent import RepairAgent
 from agent.core.task_manager import TaskManager
 from agent.core.tool_registry import ToolRegistry
 from agent.models import BugEvent, LegacyCompactionResult, RepairTask, StackFrame, ToolResult
-from agent.rag.models import RetrievalResult
+from agent.rag.models import KnowledgeReference, RagContextItem, RagRepairContext, RagStatus
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 
@@ -97,44 +97,26 @@ class BlockingCompactor:
 
 
 class FakeKnowledgeService:
-    def retrieve_skills_for_bug(self, bug_event: BugEvent, top_k: int = 3):
-        return [
-            RetrievalResult(
-                chunk_id="chunk-1",
-                doc_id="skill:demo",
-                source="skill",
-                doc_type="skill",
-                project=bug_event.project,
-                title="retrieved skill",
-                content="retrieved skill content",
-                score=0.91,
-                metadata={"top_k": top_k},
-            )
-        ]
-
-    def retrieve_project_docs_for_bug(self, bug_event: BugEvent, session: dict[str, object] | None = None, top_k: int = 5):
-        return [
-            RetrievalResult(
-                chunk_id="doc-chunk-1",
-                doc_id="local_doc:api/order.md",
-                source="local_doc",
-                doc_type="api_doc",
-                project=bug_event.project,
-                module="order",
-                title="Order API",
-                content="retrieved project doc content",
-                score=0.88,
-                metadata={"top_k": top_k},
-            )
-        ]
+    def pre_retrieve_for_bug(self, bug_event: BugEvent, session: dict[str, object]):
+        del bug_event, session
+        return _rag_context(), RagStatus(candidate_count=2, selected_source_count=2)
 
 
 class FailingKnowledgeService:
-    def retrieve_skills_for_bug(self, bug_event: BugEvent, top_k: int = 3):
+    def pre_retrieve_for_bug(self, bug_event: BugEvent, session: dict[str, object]):
         raise AssertionError("RAG should be disabled")
 
-    def retrieve_project_docs_for_bug(self, bug_event: BugEvent, session: dict[str, object] | None = None, top_k: int = 5):
-        raise AssertionError("RAG should be disabled")
+
+def _rag_context() -> RagRepairContext:
+    skill_ref = KnowledgeReference(source="skill", source_type="skill", doc_id="skill:demo", chunk_id="chunk-1", parent_id="skill:demo", title="retrieved skill")
+    doc_ref = KnowledgeReference(source="local_doc", source_type="project_doc", doc_id="local_doc:api/order.md", chunk_id="doc-chunk-1", title="Order API")
+    return RagRepairContext(
+        query_summary="NullPointerException OrderService",
+        hard_constraints=[RagContextItem(text="retrieved project doc content", source=doc_ref, use_type="business_constraint")],
+        soft_hints=[RagContextItem(text="retrieved skill content", source=skill_ref, use_type="recommended_fix")],
+        selected_sources=[skill_ref, doc_ref],
+        confidence="high",
+    )
 
 
 def test_repair_agent_builds_prompt_template() -> None:
@@ -142,7 +124,7 @@ def test_repair_agent_builds_prompt_template() -> None:
     agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
     bug_event = BugEvent(bug_id="BUG-1", source="feishu", project="demo", title="t", exception_type="E", message="m", traceback="full stack", fingerprint="fp")
 
-    prompt = agent.build_prompt_template(bug_event, ["skill-a"], {"state": "x", "frame_contexts": [{"filePath": "Demo.java"}]})
+    prompt = agent.build_prompt_template(bug_event, {"state": "x", "frame_contexts": [{"filePath": "Demo.java"}]}, _rag_context())
     payload = json.loads(prompt)
 
     assert "compile and test" in prompt
@@ -153,9 +135,10 @@ def test_repair_agent_builds_prompt_template() -> None:
     assert "traceback" not in payload["bug_event"]
     assert payload["bug_event"]["traceback_omitted"] is True
     assert payload["frame_contexts"] == [{"filePath": "Demo.java"}]
-    assert payload["retrieved_skills"] == ["skill-a"]
-    assert payload["retrieved_project_docs"] == []
-    assert "skills" not in payload
+    assert payload["rag_context"]["soft_hints"][0]["text"] == "retrieved skill content"
+    assert payload["rag_context"]["hard_constraints"][0]["text"] == "retrieved project doc content"
+    assert "retrieved_skills" not in payload
+    assert "retrieved_project_docs" not in payload
     assert "frame_contexts" not in payload["session"]
     assert "tools" not in payload
 
@@ -171,7 +154,7 @@ def test_repair_agent_prompt_excludes_full_session_tool_calls() -> None:
         "feishu_help_payload": {"secret": "do-not-inject"},
     }
 
-    payload = json.loads(agent.build_prompt_template(bug_event, [], session))
+    payload = json.loads(agent.build_prompt_template(bug_event, session))
 
     assert payload["session"]["status"] == "running"
     assert payload["session"]["last_error"]["tool"] == "run_test"
@@ -179,7 +162,7 @@ def test_repair_agent_prompt_excludes_full_session_tool_calls() -> None:
     assert "feishu_help_payload" not in payload["session"]
 
 
-def test_repair_agent_uses_retrieved_skills_not_all_skills() -> None:
+def test_repair_agent_uses_structured_rag_context_not_all_skills() -> None:
     skill_store = SkillStore()
     skill_store.put("demo-all-skill", "this full skill should not be injected")
     agent = RepairAgent(
@@ -193,15 +176,15 @@ def test_repair_agent_uses_retrieved_skills_not_all_skills() -> None:
     )
     bug_event = BugEvent(bug_id="BUG-RAG", source="log", project="demo", title="t", exception_type="NullPointerException", message="boom", fingerprint="fp")
 
-    retrieved = agent._retrieve_skills(bug_event)
-    prompt = agent.build_prompt_template(bug_event, retrieved, {})
+    context, status = agent._pre_retrieve_for_bug(bug_event, {})
+    prompt = agent.build_prompt_template(bug_event, {"rag_status": status.model_dump(mode="json")}, context)
     payload = json.loads(prompt)
 
-    assert payload["retrieved_skills"][0]["content"] == "retrieved skill content"
+    assert payload["rag_context"]["soft_hints"][0]["text"] == "retrieved skill content"
     assert "this full skill should not be injected" not in prompt
 
 
-def test_repair_agent_prompt_contains_retrieved_project_docs() -> None:
+def test_repair_agent_prompt_contains_approved_hard_constraints() -> None:
     agent = RepairAgent(
         AppConfig(),
         ToolRegistry(),
@@ -213,16 +196,15 @@ def test_repair_agent_prompt_contains_retrieved_project_docs() -> None:
     )
     bug_event = BugEvent(bug_id="BUG-DOC", source="log", project="demo", title="t", exception_type="E", message="m", fingerprint="fp")
 
-    project_docs = agent._retrieve_project_docs(bug_event, {})
-    prompt = agent.build_prompt_template(bug_event, [], {}, project_docs)
+    context, _ = agent._pre_retrieve_for_bug(bug_event, {})
+    prompt = agent.build_prompt_template(bug_event, {}, context)
     payload = json.loads(prompt)
 
-    assert "business constraints" in prompt
-    assert payload["retrieved_project_docs"][0]["content"] == "retrieved project doc content"
-    assert payload["retrieved_project_docs"][0]["doc_type"] == "api_doc"
+    assert "approved business constraints" in prompt
+    assert payload["rag_context"]["hard_constraints"][0]["text"] == "retrieved project doc content"
 
 
-def test_repair_agent_skips_project_docs_when_rag_disabled() -> None:
+def test_repair_agent_skips_pre_retrieval_when_rag_disabled() -> None:
     config = AppConfig()
     config.rag.enabled = False
     agent = RepairAgent(
@@ -236,7 +218,10 @@ def test_repair_agent_skips_project_docs_when_rag_disabled() -> None:
     )
     bug_event = BugEvent(bug_id="BUG-DISABLED", source="log", project="demo", title="t", exception_type="E", message="m", fingerprint="fp")
 
-    assert agent._retrieve_project_docs(bug_event, {}) == []
+    context, status = agent._pre_retrieve_for_bug(bug_event, {})
+
+    assert context.selected_sources == []
+    assert status.status == "disabled"
 
 
 def test_repair_agent_converts_tools_to_openai_function_specs() -> None:
@@ -245,19 +230,26 @@ def test_repair_agent_converts_tools_to_openai_function_specs() -> None:
     tools = agent._openai_tools()
     names = {tool["function"]["name"] for tool in tools}
     read_code = next(tool for tool in tools if tool["function"]["name"] == "read_code")
-    search_skill = next(tool for tool in tools if tool["function"]["name"] == "search_skill")
-    search_project_doc = next(tool for tool in tools if tool["function"]["name"] == "search_project_doc")
 
     assert "read_code" in names
-    assert "search_skill" in names
-    assert "search_project_doc" in names
+    assert "search_skill" not in names
+    assert "search_project_doc" not in names
     assert "finish_patch" in names
     assert "no_fix_needed" not in names
     assert "apply_test_patch" not in names
     assert read_code["type"] == "function"
     assert read_code["function"]["parameters"]["additionalProperties"] is False
-    assert search_skill["function"]["parameters"]["required"] == ["query", "project"]
-    assert search_project_doc["function"]["parameters"]["required"] == ["query", "project"]
+
+
+def test_repair_agent_registers_dynamic_rag_tools_only_when_enabled() -> None:
+    config = AppConfig()
+    config.rag.dynamic_tools_enabled = True
+    agent = RepairAgent(config, ToolRegistry(), PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), SessionStore(), SkillStore())
+
+    names = {tool["function"]["name"] for tool in agent._openai_tools()}
+
+    assert "search_skill" in names
+    assert "search_project_doc" in names
 
 
 def test_repair_agent_uses_native_tool_call_message_history(tmp_path: Path) -> None:
@@ -402,12 +394,25 @@ def test_repair_agent_requires_compile_and_test_after_finish_patch(tmp_path: Pat
         ).model_dump(),
     )
     session_store.put("BUG-1", {"frame_contexts": [{"filePath": str(source)}]})
-    agent = RepairAgent(config, registry, PermissionGuard(), TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)), session_store, SkillStore())
+    agent = RepairAgent(
+        config,
+        registry,
+        PermissionGuard(),
+        TaskManager(task_store=SimpleNamespace(save=lambda *_: None, get=lambda *_: None)),
+        session_store,
+        SkillStore(),
+        knowledge_service=FailingKnowledgeService(),
+    )
     agent._create_pr = lambda task, bug_event, history: ToolResult(tool="create_pr", success=True, exit_code=0, stdout_summary="https://gitee.test/pr/1", stderr_summary="", data={"pr_url": "https://gitee.test/pr/1"}, artifacts=[])
 
     result = agent.repair("BUG-1")
 
     assert result.success is True
+    saved_session = session_store.get("BUG-1")
+    assert saved_session["rag_status"]["status"] == "failed"
+    assert "rag_context" in saved_session
+    assert "rag_candidates" not in saved_session
+    assert "repair_rag_query" not in saved_session
     assert result.last_result is not None
     assert result.last_result.tool == "run_test"
     assert session_store.get("pr:") is None

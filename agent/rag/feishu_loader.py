@@ -403,5 +403,6 @@ class FeishuLoader:
                 "updated_at": raw.updated_at,
                 "token_hash": token_hash,
                 "token_type": raw.token_type,
+                "authority": "inferred",
             },
         )

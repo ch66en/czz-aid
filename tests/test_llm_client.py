@@ -124,3 +124,20 @@ def test_llm_client_records_debug_details_with_sanitization() -> None:
     assert "secret-token" not in record.input_text
     assert "abc123" not in record.output_text
     assert record.latency_ms is not None
+
+
+def test_llm_client_can_skip_full_call_record(tmp_path) -> None:
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="private candidates"))], usage=None)
+    config = AppConfig(
+        llm={"api_key": "test", "base_url": "https://api.openai.com/v1"},
+        agent={"debug": True},
+        session={"root_dir": str(tmp_path / "sessions")},
+    )
+    client = OpenAICompatibleClient(config=config, client=FakeClient(response))
+
+    result = client.chat([{"role": "user", "content": "private input"}], persist_call_record=False)
+
+    assert result.data["artifact_path"] == ""
+    assert result.artifacts == []
+    assert client.records[-1].input_text == ""
+    assert not (tmp_path / "sessions" / "llm_calls").exists()

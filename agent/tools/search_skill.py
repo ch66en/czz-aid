@@ -7,7 +7,7 @@ from typing import Any
 from agent.config import AppConfig
 from agent.models import ToolResult, ToolSpec
 from agent.rag.knowledge_service import KnowledgeService
-from agent.rag.models import RetrievalResult
+from agent.rag.models import RagStatus, RepairRagQuery, RetrievalResult
 from agent.tools.base import BaseTool, PermissionType
 
 
@@ -58,13 +58,25 @@ class SearchSkillTool(BaseTool):
 
         search_query = " ".join(part for part in [query, exception_type, module] if part)
         try:
-            raw_results = self.knowledge_service.retriever.retrieve(
-                query=search_query,
-                project=project,
-                doc_type="skill",
-                top_k=max(top_k * 4, top_k),
-                min_score=self.config.rag.min_score,
-            )
+            if hasattr(self.knowledge_service, "hybrid_retriever"):
+                raw_results = self.knowledge_service.hybrid_retriever.retrieve_skills(
+                    RepairRagQuery(
+                        project=project,
+                        module_candidates=[module] if module else [],
+                        exception_type=exception_type,
+                        skill_bm25_query=search_query,
+                        skill_vector_query=search_query,
+                    ),
+                    RagStatus(),
+                )
+            else:
+                raw_results = self.knowledge_service.retriever.retrieve(
+                    query=search_query,
+                    project=project,
+                    doc_type="skill",
+                    top_k=max(top_k * 4, top_k),
+                    min_score=self.config.rag.min_score,
+                )
         except Exception as exc:
             return ToolResult(tool="search_skill", success=False, exit_code=1, stdout_summary="", stderr_summary=str(exc), data={"query": query, "project": project}, artifacts=[])
 

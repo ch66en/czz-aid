@@ -1,26 +1,27 @@
 env: dev
-# Runtime workspace. RAG scans skills/ and docs/ under this directory.
-workspace: E:/Project/mall-service
+workspace: .
+
 project:
-  name: mall-service
-  root: E:/Project/mall-service
+  name: default-project
+  root: .
   language: java
-  default_branch: master
+  default_branch: main
+  compile_command: mvn compile
   test_command: 'mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test'
-  lint_command: ""  # 示例: "javac -Xlint:all -d /tmp/auto-fix-lint {file}"
+  lint_command: ""
+
 llm:
-  provider: doubao
+  provider: openai_compatible
   base_url: https://api.openai.com/v1
   api_key: your-api-key
   model: your-model-name
   timeout_seconds: 60
-  # 备用 LLM：主 LLM 调用失败时自动切换
-  # fallback_provider: deepseek
-  # fallback_base_url: ""
-  # fallback_api_key: sk-your-fallback-key
-  # fallback_model: deepseek-chat
+  fallback_provider: ""
+  fallback_base_url: ""
+  fallback_api_key: ""
+  fallback_model: ""
+
 compact:
-  # Legacy Full Compact：接近模型上下文上限时，用摘要替换较早消息。
   enabled: true
   context_window_tokens: 1000000
   summary_max_output_tokens: 20000
@@ -32,11 +33,13 @@ compact:
   restore_max_files: 8
   restore_max_chars_per_file: 16000
   restore_total_chars: 80000
+
 gitee:
   base_url: https://gitee.com/api/v5
   token: your-gitee-token
   owner: your-owner
   repo: your-repo
+
 feishu:
   webhook: ""
   app_id: ""
@@ -46,30 +49,59 @@ feishu:
   review_callback_host: 127.0.0.1
   review_callback_port: 8765
   review_callback_base_url: http://127.0.0.1:8765
+
 feishu_knowledge:
   enabled: false
   app_id: ""
   app_secret: ""
-  # Recommended mode: sync all readable docs under one or more Feishu wiki spaces.
-  wiki_space_ids:
-    - "replace-with-feishu-wiki-space-id"
+  wiki_space_ids: []
   sync_interval_minutes: 60
   base_url: https://open.feishu.cn/open-apis
+
 rag:
   enabled: true
   backend: sqlite
   db_path: ./data/sessions/agent.db
-  top_k_skills: 3
-  min_score: 0.25
+  auto_index_on_startup: false
+  dynamic_tools_enabled: false
+  debug_candidate_logging: false
+
   embedding_provider: fallback
   embedding_base_url: ""
   embedding_api_key: ""
   embedding_model: ""
+
+  module_aliases:
+    "com.example.order": order
+
+  retrieval:
+    bm25_weight: 1.2
+    vector_weight: 1.0
+    rrf_k: 60
+    vector_min_score: 0.25
+    skill_child_top_k: 20
+    parent_skill_top_k: 3
+    project_doc_recall_top_k: 20
+    project_doc_final_top_k: 5
+    candidate_top_n: 15
+    per_doc_chunk_cap: 2
+
+  context_synthesizer:
+    enabled: true
+    inherit_main_llm: true
+    provider: ""
+    base_url: ""
+    api_key: ""
+    model: ""
+    timeout_seconds: 60
+    max_output_tokens: 4000
+
 session:
   backend: sqlite
   root_dir: ./data/sessions
   db_path: ./data/sessions/agent.db
   retention_days: 7
+
 agent:
   name: auto-fix-agent
   max_retry: 3
@@ -77,3 +109,4 @@ agent:
   review_required: true
   watch_paths:
     - ./logs
+  debug: false

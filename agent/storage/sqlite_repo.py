@@ -16,4 +16,8 @@ class SQLiteRepo:
     def connect(self) -> sqlite3.Connection:
         """确保目录存在后返回 SQLite 连接对象。"""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn

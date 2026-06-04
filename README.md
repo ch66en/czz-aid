@@ -139,22 +139,25 @@ agent/reflection/reflection_subagent.py # Review 后反思
 
 ```bash
 pip install -r requirements.txt
-python -m agent.main watch  //启动监听
+python -m agent.main --config config.yaml watch  //启动监听
 
-python -m agent.main rag-index-skills   //触发rag建索引
+python -m agent.main --config config.yaml rag-index-skills   //增量索引 Skill
+python -m agent.main --config config.yaml rag-index-docs     //增量索引业务文档
+python -m agent.main --config config.yaml rag-rebuild-index  //全量重建向量与 FTS5
+python -m agent.main --config config.yaml rag-index-status   //查看索引状态
 
-python -m agent.main rag-search   //搜索top3的skill块
+python -m agent.main --config config.yaml rag-search
   --query "java.lang.NoSuchElementException OrderService firstItemId" 
   --project mall-service 
   --top-k 3
 
-python -m agent.main rag-index-docs   //查业务文件
-
-python -m agent.main rag-search-docs   //搜索top5的业务文件块
+python -m agent.main --config config.yaml rag-search-docs
   --query "NoSuchElementException firstItemId order module" 
-  --project mall-service `
+  --project mall-service
   --top-k 5
 ```
+
+RAG 默认不会在进程启动时自动重建索引。修复前会执行一次 BM25 + 向量混合检索，并只把结构化 `RagRepairContext` 注入 RepairAgent。动态 `search_skill` / `search_project_doc` 工具默认关闭。
 
 默认测试命令：
 
@@ -166,7 +169,7 @@ mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test
 
 ### 配置
 
-`agent/main.py` 默认从 `config.example.yaml` 加载配置。
+复制无密钥的 `config.example.yaml` 为本地 `config.yaml` 后填写运行配置。`config.yaml` 被 Git 忽略；`agent/main.py` 默认读取 `config.yaml`，也可通过全局 `--config` 指定其他文件。
 
 | 配置组 | 说明 |
 | --- | --- |
@@ -174,6 +177,7 @@ mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test
 | `llm` | OpenAI-compatible endpoint、API key、模型、超时 |
 | `gitee` | PR 创建相关配置 |
 | `feishu` | webhook 和本地 Review callback 配置 |
+| `rag` | SQLite 索引、embedding、混合检索、Context Synthesizer 和动态工具策略 |
 | `session` | 会话和产物存储目录 |
 | `agent` | 重试次数、Review、反思、日志监听路径 |
 
@@ -617,7 +621,11 @@ The system does not self-merge PRs. Successful repairs enter review and are sent
 
 ```bash
 pip install -r requirements.txt
-python -m agent.main watch
+python -m agent.main --config config.yaml watch
+python -m agent.main --config config.yaml rag-index-skills
+python -m agent.main --config config.yaml rag-index-docs
+python -m agent.main --config config.yaml rag-rebuild-index
+python -m agent.main --config config.yaml rag-index-status
 ```
 
 Default test command:
@@ -630,7 +638,7 @@ mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test
 
 ### Configuration
 
-`agent/main.py` loads runtime settings from `config.example.yaml` by default.
+Copy the secret-free `config.example.yaml` to local `config.yaml` and fill in runtime values. `config.yaml` is ignored by Git. `agent/main.py` reads `config.yaml` by default and accepts a global `--config` override.
 
 | Group | Description |
 | --- | --- |
@@ -638,6 +646,7 @@ mvn "-DargLine=-XX:+EnableDynamicAgentLoading -Xshare:off" test
 | `llm` | OpenAI-compatible endpoint, API key, model, timeout |
 | `gitee` | Pull request creation settings |
 | `feishu` | Webhook and local review callback settings |
+| `rag` | SQLite index, embeddings, hybrid retrieval, context synthesis, and dynamic-tool policy |
 | `session` | Session and artifact storage |
 | `agent` | Retry count, review policy, reflection, watched logs |
 
@@ -670,7 +679,7 @@ This is a strong working prototype with a complete closed loop, suitable as a re
 
 **0a. Remove hardcoded credentials**
 
-`config.example.copy.yaml` contains real MiMo API key and Gitee token. Fix: add to `.gitignore`, use placeholders in `config.example.yaml`, support env-var overrides (`CZZ_AID_LLM_API_KEY`, `CZZ_AID_GITEE_TOKEN`), and emit `[WARN]` at startup when placeholders are detected.
+The committed `config.example.yaml` contains placeholders only. Runtime secrets belong in ignored `config.yaml`; startup emits warnings when required values are missing.
 
 **0b. Disable `shell=True` in `RunCommandTool`**
 

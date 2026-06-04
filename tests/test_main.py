@@ -11,6 +11,35 @@ class DummyResult:
         return "ok"
 
 
+def test_main_uses_explicit_config_path(monkeypatch) -> None:
+    from agent import main as main_module
+
+    loaded: dict[str, str] = {}
+    config = AppConfig()
+    config.session.backend = "memory"
+
+    def fake_load_config(path: str) -> AppConfig:
+        loaded["path"] = path
+        return config
+
+    monkeypatch.setattr(main_module, "load_config", fake_load_config)
+    monkeypatch.setattr(main_module, "ToolRegistry", lambda: type("R", (), {"get": lambda self, name: None, "register": lambda self, tool: None, "list_tools": lambda self: []})())
+    monkeypatch.setattr(main_module, "PermissionGuard", lambda config=None: object())
+    monkeypatch.setattr(main_module, "TaskStore", lambda: object())
+    monkeypatch.setattr(main_module, "SessionStore", lambda: object())
+    monkeypatch.setattr(main_module, "SkillStore", lambda skills_dir=None: type("S", (), {"load_from_disk": lambda self: 0})())
+    monkeypatch.setattr(main_module, "TaskManager", lambda task_store: object())
+    monkeypatch.setattr(main_module, "RepairAgent", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "IngestionPipeline", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "Doctor", lambda config: type("D", (), {"run": lambda self: "doctor"})())
+    monkeypatch.setattr(main_module, "ReflectionSubAgent", lambda **kwargs: object())
+
+    exit_code = main(["--config", "custom.yaml", "doctor"])
+
+    assert exit_code == 0
+    assert loaded["path"] == "custom.yaml"
+
+
 def test_repair_reads_log_from_path(tmp_path: Path, monkeypatch) -> None:
     log_path = tmp_path / "error.log"
     log_path.write_text("java.lang.RuntimeException: boom", encoding="utf-8")
@@ -192,3 +221,66 @@ def test_rag_index_docs_does_not_create_llm_client(tmp_path: Path, monkeypatch) 
 
     assert exit_code == 0
     assert created["knowledge_service"]["config"] is config
+
+
+def test_rag_rebuild_and_status_commands_do_not_create_llm_client(tmp_path: Path, monkeypatch, capsys) -> None:
+    from agent import main as main_module
+
+    config = AppConfig(workspace=str(tmp_path), session={"backend": "memory"})
+    config.llm.api_key = "configured-but-not-needed"
+
+    class FakeKnowledgeService:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def rebuild_index(self) -> dict[str, int]:
+            return {"skills": 2, "local_docs": 3, "feishu_docs": 0}
+
+        def index_status(self) -> dict[str, object]:
+            return {"documents": 5, "chunks": 10, "fts_chunks": 10, "meta": {"schema_version": "2"}}
+
+    def fail_llm_client(**kwargs):
+        raise AssertionError("index maintenance commands should not create an LLM client")
+
+    monkeypatch.setattr(main_module, "load_config", lambda _: config)
+    monkeypatch.setattr(main_module, "KnowledgeService", FakeKnowledgeService)
+    monkeypatch.setattr(main_module, "OpenAICompatibleClient", fail_llm_client)
+
+    assert main(["rag-rebuild-index"]) == 0
+    assert '"skills": 2' in capsys.readouterr().out
+    assert main(["rag-index-status"]) == 0
+    assert '"documents": 5' in capsys.readouterr().out
+
+
+def test_startup_auto_index_failure_does_not_block_doctor(monkeypatch) -> None:
+    from agent import main as main_module
+
+    config = AppConfig(session={"backend": "memory"}, rag={"auto_index_on_startup": True})
+
+    class FailingKnowledgeService:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def index_skills(self) -> int:
+            raise RuntimeError("skill index unavailable")
+
+        def index_local_docs(self) -> int:
+            raise RuntimeError("doc index unavailable")
+
+        def set_synthesizer_llm_client(self, llm_client) -> None:
+            pass
+
+    monkeypatch.setattr(main_module, "load_config", lambda _: config)
+    monkeypatch.setattr(main_module, "KnowledgeService", FailingKnowledgeService)
+    monkeypatch.setattr(main_module, "ToolRegistry", lambda: type("R", (), {"get": lambda self, name: None, "register": lambda self, tool: None, "list_tools": lambda self: []})())
+    monkeypatch.setattr(main_module, "PermissionGuard", lambda config=None: object())
+    monkeypatch.setattr(main_module, "TaskStore", lambda: object())
+    monkeypatch.setattr(main_module, "SessionStore", lambda: object())
+    monkeypatch.setattr(main_module, "SkillStore", lambda skills_dir=None: type("S", (), {"load_from_disk": lambda self: 0})())
+    monkeypatch.setattr(main_module, "TaskManager", lambda task_store: object())
+    monkeypatch.setattr(main_module, "RepairAgent", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "IngestionPipeline", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "Doctor", lambda config: type("D", (), {"run": lambda self: "doctor ok"})())
+    monkeypatch.setattr(main_module, "ReflectionSubAgent", lambda **kwargs: object())
+
+    assert main(["doctor"]) == 0

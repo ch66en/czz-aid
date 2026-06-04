@@ -63,6 +63,10 @@ class LocalDocLoader:
 
         project = str(metadata.get("project") or self.default_project)
         module = str(metadata.get("module") or "")
+        authority = str(metadata.get("authority") or "unclassified").lower()
+        if authority not in {"approved", "draft", "inferred", "unclassified"}:
+            authority = "unclassified"
+        metadata["authority"] = authority
         title = str(metadata.get("title") or self._first_heading(content) or path.stem)
         relative = self._relative_uri(path)
         content_hash = f"sha256:{sha256(content.encode('utf-8')).hexdigest()}"

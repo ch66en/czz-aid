@@ -82,7 +82,13 @@ class ReflectionSubAgent:
             context=context,
         )
         summary = self._ask_llm(prompt)
-        skill_artifact = self._generate_and_persist_skill(bug_event=bug_event, review_event=review_event, title=bug_event.title or bug_event.exception_type, body=summary)
+        skill_artifact = self._generate_and_persist_skill(
+            bug_event=bug_event,
+            review_event=review_event,
+            title=bug_event.title or bug_event.exception_type,
+            body=summary,
+            context=context,
+        )
         self._update_session(
             review_event.task_id,
             {
@@ -128,7 +134,13 @@ class ReflectionSubAgent:
             context=context,
         )
         summary = self._ask_llm(prompt)
-        skill_artifact = self._generate_and_persist_skill(bug_event=bug_event, review_event=review_event, title=bug_event.title or bug_event.exception_type, body=summary)
+        skill_artifact = self._generate_and_persist_skill(
+            bug_event=bug_event,
+            review_event=review_event,
+            title=bug_event.title or bug_event.exception_type,
+            body=summary,
+            context=context,
+        )
         self._update_session(
             review_event.task_id,
             {
@@ -263,7 +275,8 @@ class ReflectionSubAgent:
         return (
             "你是一个只负责总结的反思模型，不负责选择工具。\n"
             "请只输出 JSON 对象，字段包括：applicable_scenario, typical_signals, root_cause, useful_steps, "
-            "useless_steps, missing_steps, agent_mistakes, human_fix_key_points, recommended_steps, avoid_patterns, validation_steps。\n"
+            "root_cause_type, fix_pattern, useless_steps, missing_steps, agent_mistakes, human_fix_key_points, "
+            "recommended_steps, avoid_patterns, validation_steps。\n"
             "review_passed 时总结 Agent 做对的路径；review_failed 时重点比较 agent_diff 与 human_diff，指出 Agent 修错层、漏掉上下文或漏测试的原因。\n"
             f"INPUT: {json.dumps(context, ensure_ascii=False, default=str)}"
         )
@@ -284,6 +297,8 @@ class ReflectionSubAgent:
                 "applicable_scenario": "Java 服务异常栈触发的自动修复复盘。",
                 "typical_signals": ["日志中出现 Java exception", "存在可定位的业务栈帧"],
                 "root_cause": "根据 top business frame 和验证结果确认根因。",
+                "root_cause_type": "unknown",
+                "fix_pattern": "minimal_verified_fix",
                 "useful_steps": ["优先读取 top business frame", "生成最小补丁", "执行 compile/test"],
                 "useless_steps": [],
                 "missing_steps": [],
@@ -296,14 +311,80 @@ class ReflectionSubAgent:
             ensure_ascii=False,
         )
 
-    def _generate_and_persist_skill(self, *, bug_event: BugEvent, review_event: ReviewEvent, title: str, body: str) -> SkillArtifact:
+    def _generate_and_persist_skill(
+        self,
+        *,
+        bug_event: BugEvent,
+        review_event: ReviewEvent,
+        title: str,
+        body: str,
+        context: dict[str, Any],
+    ) -> SkillArtifact:
         skill_name = self._build_skill_name(bug_event, review_event)
         skill_dir = Path(self.config.workspace) / "skills" / skill_name
-        artifact = self.skill_generator.build(name=skill_name, description=title, source_bug_id=bug_event.bug_id, body=body, skill_dir=skill_dir)
+        artifact = self.skill_generator.build(
+            name=skill_name,
+            description=title,
+            source_bug_id=bug_event.bug_id,
+            body=body,
+            skill_dir=skill_dir,
+            metadata=self._skill_metadata(bug_event, review_event, body, context),
+        )
         artifact.markdown_path.write_text(artifact.markdown, encoding="utf-8")
         artifact.meta_path.write_text(artifact.meta.model_dump_json(indent=2), encoding="utf-8")
         self.skill_store.put(skill_name, artifact.markdown)
         return artifact
+
+    def _skill_metadata(
+        self,
+        bug_event: BugEvent,
+        review_event: ReviewEvent,
+        body: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        frame = next((item for item in bug_event.frames if item.is_business_code), None)
+        frame = frame or (bug_event.frames[0] if bug_event.frames else None)
+        class_name = ""
+        method_name = ""
+        if frame is not None:
+            class_name = str(frame.module_name.rpartition(".")[2] if frame.module_name else Path(frame.file_path).stem)
+            method_name = frame.function_name
+        summary = self._summary_json(body)
+        skill_type = review_event.decision if review_event.decision in {"review_passed", "review_failed"} else "legacy_unclassified"
+        use_types = {
+            "review_passed": ["recommended_fix", "validation_hint"],
+            "review_failed": ["human_fix_hint", "avoid_pattern", "validation_hint"],
+            "legacy_unclassified": ["debug_hint"],
+        }[skill_type]
+        extra = context.get("extra") if isinstance(context.get("extra"), dict) else {}
+        return {
+            "schema_version": 2,
+            "project": bug_event.project,
+            "exception_type": bug_event.exception_type,
+            "top_business_frame": bug_event.top_business_frame,
+            "class_name": class_name,
+            "method_name": method_name,
+            "root_cause_type": str(summary.get("root_cause_type") or ""),
+            "fix_pattern": str(summary.get("fix_pattern") or ""),
+            "skill_type": skill_type,
+            "use_types": use_types,
+            "has_human_diff": bool(extra.get("human_diff")),
+            "has_agent_diff": bool(extra.get("agent_diff") or context.get("agent_patch")),
+        }
+
+    def _summary_json(self, body: str) -> dict[str, Any]:
+        text = body.strip()
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, flags=re.S)
+            if not match:
+                return {}
+            try:
+                value = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return {}
+        return value if isinstance(value, dict) else {}
 
     def _build_skill_name(self, bug_event: BugEvent, review_event: ReviewEvent) -> str:
         base = bug_event.title or bug_event.exception_type or bug_event.bug_id

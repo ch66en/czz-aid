@@ -50,6 +50,10 @@ def test_reflection_review_passed_creates_skill(tmp_path) -> None:
     assert skill_store.get(result.skill_artifact.meta.name) is not None
     assert "## 适用场景" in result.skill_artifact.markdown
     assert "## 验证方式" in result.skill_artifact.markdown
+    assert result.skill_artifact.meta.skill_type == "review_passed"
+    assert result.skill_artifact.meta.use_types == ["recommended_fix", "validation_hint"]
+    assert result.skill_artifact.meta.project == "demo"
+    assert result.skill_artifact.meta.exception_type == "NullPointerException"
 
 
 def test_reflection_review_failed_requires_human_branch(tmp_path) -> None:
@@ -133,6 +137,10 @@ def test_reflection_review_failed_compares_agent_and_human_diff(tmp_path) -> Non
     assert session["diff_analysis"]["agent_only_files"] == ["src/Agent.java"]
     assert session["diff_analysis"]["human_only_files"] == ["src/Human.java"]
     assert "## 人工修复关键点" in result.skill_artifact.markdown
+    assert result.skill_artifact.meta.skill_type == "review_failed"
+    assert "recommended_fix" not in result.skill_artifact.meta.use_types
+    assert result.skill_artifact.meta.has_agent_diff is True
+    assert result.skill_artifact.meta.has_human_diff is True
 
 
 def test_reflection_review_failed_recovers_agent_branch_from_pr_result(tmp_path) -> None:

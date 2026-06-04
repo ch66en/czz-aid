@@ -22,7 +22,9 @@ class MarkdownChunker:
                 text = part.strip()
                 if not text:
                     continue
-                content_hash = self._hash(text)
+                section_name = heading_path[-1] if heading_path else document.title
+                retrieval_text = self._retrieval_text(document.title, heading_path, text)
+                content_hash = self._hash(retrieval_text)
                 index = len(chunks)
                 chunks.append(
                     KnowledgeChunk(
@@ -34,14 +36,21 @@ class MarkdownChunker:
                         module=document.module,
                         title=document.title,
                         heading_path=heading_path,
-                        content=text,
-                        token_count=len(text.split()),
+                        child_type="document_chunk",
+                        section_name=section_name,
+                        content=retrieval_text,
+                        token_count=len(retrieval_text.split()),
                         content_hash=content_hash,
                         metadata={**document.metadata, "uri": document.uri, "heading_path": heading_path},
                         updated_at=document.updated_at,
                     )
                 )
         return chunks
+
+    def _retrieval_text(self, title: str, heading_path: list[str], content: str) -> str:
+        labels = [title, *heading_path]
+        prefix = " / ".join(dict.fromkeys(label for label in labels if label))
+        return f"{prefix}\n\n{content}".strip() if prefix else content
 
     def _sections(self, content: str) -> list[tuple[list[str], str]]:
         lines = content.splitlines()

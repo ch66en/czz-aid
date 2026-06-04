@@ -205,7 +205,7 @@ class FeishuTool(BaseTool):
             ("路径", args.get("skill_path", "")),
             ("状态", "已上传至云端共享"),
         ]
-        return self._interactive_card(title="Skill 已上传至云端共享", color="blue", message=message, fields=fields, actions=[])
+        return self._interactive_card(title="Skill 已生成", color="blue", message=message, fields=fields, actions=[])
 
     def _interactive_card(self, *, title: str, color: str, message: str, fields: list[tuple[str, Any]], actions: list[dict[str, Any]]) -> dict[str, Any]:
         elements: list[dict[str, Any]] = [

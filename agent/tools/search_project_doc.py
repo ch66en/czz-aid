@@ -8,7 +8,7 @@ from agent.config import AppConfig
 from agent.models import ToolResult, ToolSpec
 from agent.rag.knowledge_service import KnowledgeService
 from agent.rag.local_doc_loader import LOCAL_DOC_TYPES
-from agent.rag.models import RetrievalResult
+from agent.rag.models import RagStatus, RepairRagQuery, RetrievalResult
 from agent.tools.base import BaseTool, PermissionType
 
 
@@ -66,13 +66,26 @@ class SearchProjectDocTool(BaseTool):
 
         search_query = " ".join(part for part in [query, module] if part)
         try:
-            raw_results = self.knowledge_service.retriever.retrieve(
-                query=search_query,
-                project=project,
-                doc_type=doc_types or LOCAL_DOC_TYPES,
-                top_k=max(top_k * 4, top_k),
-                min_score=self.config.rag.min_score,
-            )
+            if hasattr(self.knowledge_service, "hybrid_retriever"):
+                raw_results = self.knowledge_service.hybrid_retriever.retrieve_project_docs(
+                    RepairRagQuery(
+                        project=project,
+                        module_candidates=[module] if module else [],
+                        project_doc_bm25_query=search_query,
+                        project_doc_vector_query=search_query,
+                    ),
+                    RagStatus(),
+                )
+                if doc_types:
+                    raw_results = [item for item in raw_results if item.doc_type in doc_types]
+            else:
+                raw_results = self.knowledge_service.retriever.retrieve(
+                    query=search_query,
+                    project=project,
+                    doc_type=doc_types or LOCAL_DOC_TYPES,
+                    top_k=max(top_k * 4, top_k),
+                    min_score=self.config.rag.min_score,
+                )
         except Exception as exc:
             return ToolResult(
                 tool="search_project_doc",

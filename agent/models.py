@@ -163,9 +163,22 @@ class SkillMeta(BaseModel):
 
     name: str
     version: str = "1.0.0"
+    schema_version: int = 2
     description: str = ""
     source_bug_id: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    project: str = ""
+    module: str = ""
+    exception_type: str = ""
+    top_business_frame: str = ""
+    class_name: str = ""
+    method_name: str = ""
+    root_cause_type: str = ""
+    fix_pattern: str = ""
+    skill_type: str = "legacy_unclassified"
+    use_types: list[str] = Field(default_factory=list)
+    has_human_diff: bool = False
+    has_agent_diff: bool = False
 
 
 class ReviewDecision(str, Enum):

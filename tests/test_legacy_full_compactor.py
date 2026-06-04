@@ -137,6 +137,35 @@ def test_compact_summarizes_old_rounds_and_keeps_recent_round_intact(tmp_path: P
     assert boundary["transcript_path"] == result.transcript_path
 
 
+def test_legacy_compact_preserves_rag_context_in_rebuilt_system_prompt(tmp_path: Path) -> None:
+    llm = FakeSummaryLLM([_summary_success()])
+    compactor = LegacyFullCompactor(_config(tmp_path), llm, estimator=ControlledEstimator(before=170, after=60))  # type: ignore[arg-type]
+    prompt = json.dumps(
+        {
+            "role": "repair",
+            "rag_context": {
+                "hard_constraints": [{"text": "approved rule"}],
+                "soft_hints": [],
+                "confidence": "high",
+            },
+        },
+        ensure_ascii=False,
+    )
+    messages = [{"role": "system", "content": prompt}, *_round(1), *_round(2), *_round(3)]
+
+    result = compactor.compact_if_needed(
+        bug_id="BUG-RAG-COMPACT",
+        messages=messages,
+        session={"rag_status": {"status": "success"}},
+        rebuilt_system_prompt=prompt,
+        tools=[],
+    )
+
+    assert result.compacted is True
+    assert result.messages[0]["content"] == prompt
+    assert "approved rule" in result.messages[0]["content"]
+
+
 def test_select_recent_rounds_drops_orphan_tool_message(tmp_path: Path) -> None:
     compactor = LegacyFullCompactor(_config(tmp_path, keep_recent_rounds=2), FakeSummaryLLM([]))
     messages = [

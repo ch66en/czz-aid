@@ -26,12 +26,13 @@ from agent.reflection.reflection_subagent import ReflectionSubAgent
 from agent.storage.session_store import SessionStore, SQLiteSessionStore
 from agent.storage.skill_store import SkillStore
 from agent.storage.task_store import TaskStore, SQLiteTaskStore
-from agent.ui import print_banner, info, success as ui_success, error as ui_error
+from agent.ui import print_banner, info, success as ui_success, error as ui_error, warning as ui_warning
 
 
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
     parser = argparse.ArgumentParser(prog="auto-fix-agent")
+    parser.add_argument("--config", default="config.yaml", help="Runtime YAML config path. Defaults to config.yaml.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("doctor")
@@ -55,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("rag-index-skills")
     subparsers.add_parser("rag-index-docs")
     subparsers.add_parser("rag-sync-feishu")
+    subparsers.add_parser("rag-rebuild-index")
+    subparsers.add_parser("rag-index-status")
 
     rag_search_parser = subparsers.add_parser("rag-search")
     rag_search_parser.add_argument("--query", required=True)
@@ -78,7 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print_banner()
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config("config.example.yaml")
+    config = load_config(args.config)
 
     info(f"env={config.env}  workspace={config.workspace}")
     info(f"project={config.project.name}  language={config.project.language}")
@@ -95,7 +98,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not config.gitee.token.strip() or config.gitee.token.strip() in ("", "your-gitee-token"):
         missing.append("gitee.token")
     if missing:
-        from agent.ui import warning as ui_warning
         ui_warning(f"Missing config: {', '.join(missing)}")
     else:
         from agent.ui import success as ui_success
@@ -135,13 +137,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = knowledge_service.sync_feishu_docs()
         print(json.dumps(result, ensure_ascii=False))
         return 0
-    if config.rag.enabled:
-        indexed_skills = knowledge_service.index_skills()
-        if indexed_skills:
-            info(f"Indexed {indexed_skills} skill document(s) into RAG")
-        indexed_docs = knowledge_service.index_local_docs()
-        if indexed_docs:
-            info(f"Indexed {indexed_docs} local doc(s) into RAG")
+    if args.command == "rag-rebuild-index":
+        result = knowledge_service.rebuild_index()
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    if args.command == "rag-index-status":
+        result = knowledge_service.index_status()
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    if config.rag.enabled and config.rag.auto_index_on_startup:
+        try:
+            indexed_skills = knowledge_service.index_skills()
+            if indexed_skills:
+                info(f"Indexed {indexed_skills} skill document(s) into RAG")
+        except Exception:
+            ui_warning("Startup Skill indexing failed; repair will continue")
+        try:
+            indexed_docs = knowledge_service.index_local_docs()
+            if indexed_docs:
+                info(f"Indexed {indexed_docs} local doc(s) into RAG")
+        except Exception:
+            ui_warning("Startup project-doc indexing failed; repair will continue")
         if config.feishu_knowledge.enabled:
             feishu_sync = knowledge_service.sync_feishu_docs()
             if feishu_sync.get("indexed"):
@@ -172,6 +188,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     llm_client = OpenAICompatibleClient(config=config) if config.llm.api_key.strip() else None
     if llm_client is not None:
         llm_client.ping()
+    if config.rag.context_synthesizer.enabled and hasattr(knowledge_service, "set_synthesizer_llm_client"):
+        synthesizer_client = llm_client if config.rag.context_synthesizer.inherit_main_llm else None
+        if not config.rag.context_synthesizer.inherit_main_llm and config.rag.context_synthesizer.api_key.strip():
+            synthesizer_config = config.model_copy(deep=True)
+            synthesizer_config.llm.provider = config.rag.context_synthesizer.provider or config.llm.provider
+            synthesizer_config.llm.base_url = config.rag.context_synthesizer.base_url or config.llm.base_url
+            synthesizer_config.llm.api_key = config.rag.context_synthesizer.api_key
+            synthesizer_config.llm.model = config.rag.context_synthesizer.model or config.llm.model
+            synthesizer_config.llm.timeout_seconds = config.rag.context_synthesizer.timeout_seconds
+            synthesizer_client = OpenAICompatibleClient(config=synthesizer_config)
+        knowledge_service.set_synthesizer_llm_client(synthesizer_client)
     repair_agent = RepairAgent(
         config=config,
         registry=registry,

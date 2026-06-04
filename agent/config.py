@@ -110,18 +110,54 @@ class AgentConfig(BaseModel):
     debug: bool = False
 
 
+class RagRetrievalConfig(BaseModel):
+    """Configure hybrid retrieval and parent-result aggregation."""
+
+    bm25_weight: float = 1.2
+    vector_weight: float = 1.0
+    rrf_k: int = 60
+    vector_min_score: float = 0.25
+    skill_child_top_k: int = 20
+    parent_skill_top_k: int = 3
+    project_doc_recall_top_k: int = 20
+    project_doc_final_top_k: int = 5
+    candidate_top_n: int = 15
+    per_doc_chunk_cap: int = 2
+
+
+class RagContextSynthesizerConfig(BaseModel):
+    """Configure the optional LLM-backed RAG context synthesizer."""
+
+    enabled: bool = True
+    inherit_main_llm: bool = True
+    provider: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    timeout_seconds: int = 60
+    max_output_tokens: int = 4000
+
+
 class RagConfig(BaseModel):
     """Configure local RAG indexing and retrieval."""
 
     enabled: bool = True
     backend: str = "sqlite"
     db_path: str = "./data/sessions/agent.db"
+    auto_index_on_startup: bool = False
+    dynamic_tools_enabled: bool = False
+    debug_candidate_logging: bool = False
+
     top_k_skills: int = 3
     min_score: float = 0.25
     embedding_provider: str = "fallback"
     embedding_base_url: str = ""
     embedding_api_key: str = ""
     embedding_model: str = ""
+
+    module_aliases: dict[str, str] = Field(default_factory=dict)
+    retrieval: RagRetrievalConfig = Field(default_factory=RagRetrievalConfig)
+    context_synthesizer: RagContextSynthesizerConfig = Field(default_factory=RagContextSynthesizerConfig)
 
 
 class AppConfig(BaseModel):

@@ -23,6 +23,7 @@ from agent.ingestion.sanitizer import Sanitizer
 from agent.llm.openai_compatible_client import OpenAICompatibleClient
 from agent.models import BugEvent, RepairTask, TaskStatus, ToolResult, ToolSpec
 from agent.rag.knowledge_service import KnowledgeService
+from agent.rag.models import RagRepairContext, RagStatus
 from agent.storage.session_store import SessionStore
 from agent.storage.skill_store import SkillStore
 from agent.tools.base import PermissionType
@@ -96,29 +97,34 @@ class RepairAgent:
 
     def _ensure_core_tools(self) -> None:
         """确保核心工具已注册到工具注册表。"""
-        for tool in [
+        tools = [
             AstSymbolsTool(),
             ReadSymbolAtTool(),
             ReadCodeTool(self.config),
             SearchCodeTool(),
-            SearchSkillTool(self.config, self.knowledge_service),
-            SearchProjectDocTool(self.config, self.knowledge_service),
             EditCodeTool(self.config),
             ApplyTestPatchTool(self.config),
             RunCommandTool(self.config),
             GitDiffTool(),
             RunCompileTool(self.config),
             RunTestTool(self.config),
-        ]:
+        ]
+        if self.config.rag.dynamic_tools_enabled:
+            tools.extend(
+                [
+                    SearchSkillTool(self.config, self.knowledge_service),
+                    SearchProjectDocTool(self.config, self.knowledge_service),
+                ]
+            )
+        for tool in tools:
             if self.registry.get(tool.spec.name) is None:
                 self.registry.register(tool)
 
     def build_prompt_template(
         self,
         bug_event: BugEvent,
-        retrieved_skills: list[Any],
         session: dict[str, Any],
-        retrieved_project_docs: list[Any] | None = None,
+        rag_context: RagRepairContext | dict[str, Any] | None = None,
     ) -> str:
         """构造修复代理系统提示词模板。"""
         frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
@@ -127,32 +133,44 @@ class RepairAgent:
         prompt_session = self._build_slim_session_view(session)
         bug_summary = bug_event.model_dump(exclude={"traceback"})
         bug_summary["traceback_omitted"] = bool(bug_event.traceback)
+        rules = [
+            "Use only the available function tools; do not describe tool calls in plain text.",
+            "Call exactly one function tool per turn.",
+            "Current source code and test results are the highest-priority facts.",
+            "Use bug_event.frames and frame_contexts to locate the failure; full traceback is omitted to avoid repeated stack noise.",
+            "Prefer the top business frame as the first repair target unless evidence points elsewhere.",
+            "rag_context.hard_constraints contain approved business constraints; preserve them unless current evidence shows a conflict.",
+            "rag_context.soft_hints are historical experience, not current-source facts. Verify them with read_code before editing.",
+            "Do not turn rag_context.avoid_patterns into a recommended patch.",
+            "When rag_context.confidence is low, treat all RAG guidance as weak hints.",
+            "When rag_context.conflicts is non-empty, preserve the conflict in the repair explanation for human review.",
+            "CRITICAL: frame_contexts may contain pre-extracted source code for some business frames as reference, but you should still call read_code to gather full context and evidence before repairing. When calling read_code or search_code, always use the full filePath from frame_contexts or bug_event.frames — never use bare filenames like 'OrderService.java'.",
+            "Use search_code for project-scoped Java keyword searches; its root is enforced by runtime.",
+            "edit_code content must be a unified diff/patch, not a full file rewrite.",
+            "After a successful edit, finish_patch triggers compile and test; do not skip them.",
+            "After a valid source edit, runtime may generate a separate regression test patch before compile/test.",
+            "Return finish_patch only after a code edit has succeeded.",
+        ]
+        if self.config.rag.dynamic_tools_enabled:
+            rules.extend(
+                [
+                    "Use search_project_doc only when the pre-retrieved context is insufficient.",
+                    "Use search_skill only when additional historical precedent is required.",
+                ]
+            )
+        context_value = rag_context or session.get("rag_context") or RagRepairContext()
+        if hasattr(context_value, "model_dump"):
+            context_value = context_value.model_dump(mode="json")
         prompt = {
             "role": "You are an automated Java repair agent. Use native function tools to inspect and repair Java bugs.",
-            "rules": [
-                "Use only the available function tools; do not describe tool calls in plain text.",
-                "Call exactly one function tool per turn.",
-                "Use bug_event.frames and frame_contexts to locate the failure; full traceback is omitted to avoid repeated stack noise.",
-                "Prefer the top business frame as the first repair target unless evidence points elsewhere.",
-                "Use retrieved_skills as prior repair experience. Treat them as guidance, not proof; verify against current code and tests.",
-                "Use retrieved_project_docs as business constraints. If project docs specify API contract, error code, status transition, or module responsibility, prioritize them over generic fixes.",
-                "When frame_contexts are insufficient, business semantics are unclear, or the exception touches API contracts, state transitions, module ownership, or error-code behavior, call search_project_doc before editing.",
-                "When you need precedent for a similar exception, repair pattern, or historical human review decision, call search_skill before editing.",
-                "CRITICAL: frame_contexts may contain pre-extracted source code for some business frames as reference, but you should still call read_code to gather full context and evidence before repairing. When calling read_code or search_code, always use the full filePath from frame_contexts or bug_event.frames — never use bare filenames like 'OrderService.java'.",
-                "Use search_code for project-scoped Java keyword searches; its root is enforced by runtime.",
-                "edit_code content must be a unified diff/patch, not a full file rewrite.",
-                "After a successful edit, finish_patch triggers compile and test; do not skip them.",
-                "After a valid source edit, runtime may generate a separate regression test patch before compile/test.",
-                "Return finish_patch only after a code edit has succeeded.",
-            ],
+            "rules": rules,
             "terminal_tools": {
                 "finish_patch": "Call after a successful edit_code when the patch is ready for compile/test.",
             },
             "project": {"name": bug_event.project, "root": self.config.project.root},
             "bug_event": bug_summary,
             "frame_contexts": frame_contexts,
-            "retrieved_skills": self._serialize_retrieved_skills(retrieved_skills),
-            "retrieved_project_docs": self._serialize_retrieved_skills(retrieved_project_docs or []),
+            "rag_context": context_value,
             "session": prompt_session,
         }
         return json.dumps(prompt, ensure_ascii=False, default=str)
@@ -167,9 +185,11 @@ class RepairAgent:
         frame_contexts = session.get("frame_contexts", []) if isinstance(session, dict) else []
         if frame_contexts:
             session = {**session, "frame_contexts": frame_contexts}
-        retrieved_skills = self._retrieve_skills(bug_event)
-        retrieved_project_docs = self._retrieve_project_docs(bug_event, session)
-        prompt_template = self.build_prompt_template(bug_event, retrieved_skills, session, retrieved_project_docs)
+        rag_context, rag_status = self._pre_retrieve_for_bug(bug_event, session)
+        session["rag_context"] = rag_context.model_dump(mode="json")
+        session["rag_status"] = rag_status.model_dump(mode="json")
+        self._save_session(bug_id, session)
+        prompt_template = self.build_prompt_template(bug_event, session, rag_context)
         history: list[dict[str, Any]] = []
         llm_messages: list[dict[str, Any]] = [{"role": "system", "content": prompt_template}]
         self._append_transcript_message(bug_id, llm_messages[0], source="repair_start", session=session)
@@ -462,15 +482,6 @@ class RepairAgent:
         """把 BugEvent 写入会话存储，供后续轮次读取。"""
         self.session_store.put(f"bug_event:{bug_event.bug_id}", bug_event.model_dump())
 
-    def _serialize_retrieved_skills(self, skills: list[Any]) -> list[Any]:
-        serialized: list[Any] = []
-        for skill in skills:
-            if hasattr(skill, "model_dump"):
-                serialized.append(skill.model_dump(mode="json"))
-            else:
-                serialized.append(skill)
-        return serialized
-
     def _build_slim_session_view(self, session: dict[str, Any]) -> dict[str, Any]:
         """提取系统提示词真正需要的 session 状态，避免重复注入完整审计历史。"""
         keys = (
@@ -487,6 +498,7 @@ class RepairAgent:
             "denied_commands",
             "legacy_compaction_state",
             "transcript_path",
+            "rag_status",
         )
         slim: dict[str, Any] = {}
         for key in keys:
@@ -505,37 +517,23 @@ class RepairAgent:
             return value
         return serialized[:max_chars] + "...[状态内容已截断]"
 
-    def _retrieve_skills(self, bug_event: BugEvent) -> list[Any]:
-        if self.knowledge_service is not None and self.config.rag.enabled:
-            try:
-                results = self.knowledge_service.retrieve_skills_for_bug(bug_event, top_k=self.config.rag.top_k_skills)
-            except Exception as exc:
-                ui.warning(f"Skill RAG unavailable  error={exc}")
-            else:
-                if results:
-                    return results
-        return self._load_skills(bug_event.project, limit=self.config.rag.top_k_skills)
-
-    def _retrieve_project_docs(self, bug_event: BugEvent, session: dict[str, Any]) -> list[Any]:
+    def _pre_retrieve_for_bug(self, bug_event: BugEvent, session: dict[str, Any]) -> tuple[RagRepairContext, RagStatus]:
         if self.knowledge_service is None or not self.config.rag.enabled:
-            return []
+            return RagRepairContext(missing_info=["RAG is disabled or unavailable."]), RagStatus(status="disabled")
         try:
-            return self.knowledge_service.retrieve_project_docs_for_bug(bug_event, session=session, top_k=5)
+            return self.knowledge_service.pre_retrieve_for_bug(bug_event, session)
         except Exception as exc:
-            ui.warning(f"Project doc RAG unavailable  error={exc}")
-            return []
-
-    def _load_skills(self, project: str, limit: int | None = None) -> list[str]:
-        """按项目检索相关技能。"""
-        skills: list[str] = []
-        for key in list(getattr(self.skill_store, "_items", {}).keys()):
-            if project in key or not skills:
-                value = self.skill_store.get(key)
-                if value:
-                    skills.append(value)
-                    if limit is not None and len(skills) >= limit:
-                        break
-        return skills
+            message = " ".join(self.sanitizer.sanitize(str(exc)).split())[:240]
+            ui.warning(f"Repair RAG unavailable  error={message}")
+            return (
+                RagRepairContext(missing_info=["Repair-time RAG failed; continue with current source evidence."]),
+                RagStatus(
+                    status="failed",
+                    degraded_stages=["pre_retrieve"],
+                    reasons=[message],
+                    fallback_strategies=["empty_rag_context"],
+                ),
+            )
 
     def _ask_llm(self, messages: list[dict[str, Any]], history: list[dict[str, Any]], bug_event: BugEvent, session: dict[str, Any]) -> dict[str, Any]:
         """请求 LLM 输出下一步动作。"""
@@ -854,10 +852,7 @@ class RepairAgent:
         path = str((result.data or {}).get("path", ""))
         if not path:
             return False
-        normalized = path.replace("\\", "/").lower()
-        if "/tmp/" in f"/{normalized}/" or normalized.startswith("tmp/") or normalized.startswith("./tmp/"):
-            return False
-        if not normalized.endswith(".java"):
+        if not path.replace("\\", "/").lower().endswith(".java"):
             return False
         try:
             patch_path = Path(path).resolve()
@@ -880,6 +875,9 @@ class RepairAgent:
         try:
             relative_path = patch_path.relative_to(project_root)
         except ValueError:
+            return False
+        relative_parts = [part.lower() for part in relative_path.parts]
+        if relative_parts and relative_parts[0] in {"tmp", "temp"}:
             return False
         if self._is_project_java_source_path(relative_path):
             return True
@@ -988,7 +986,7 @@ class RepairAgent:
         if tracked:
             result = self._run_git(project_root, ["git", "restore", *tracked])
             if result.returncode == 0:
-                restored.extend(tracked)
+                restored.extend(str(project_root / rel) for rel in tracked)
             else:
                 errors.append(f"git restore failed: {(result.stderr or '').strip()}")
 
@@ -997,7 +995,7 @@ class RepairAgent:
                 target = project_root / rel
                 if target.exists():
                     target.unlink()
-                    removed.append(rel)
+                    removed.append(str(target))
             except OSError as exc:
                 errors.append(f"remove {rel} failed: {exc}")
 

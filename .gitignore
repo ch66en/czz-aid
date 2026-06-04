@@ -31,7 +31,6 @@ tmp/
 # Config with secrets
 config.yaml
 config.local.yaml
-config.example.yaml
 
 # OS
 .DS_Store

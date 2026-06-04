@@ -376,6 +376,7 @@ class EditCodeTool(BaseTool):
             tokens = shlex.split(command, posix=False)
         except ValueError:
             tokens = command.split()
+        tokens = [token[1:-1] if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'} else token for token in tokens]
 
         cwd = Path(self.config.project.root) if self.config.project.root != "." else file_path.parent
 

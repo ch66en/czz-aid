@@ -18,6 +18,10 @@ def test_load_config_returns_defaults_when_file_missing(tmp_path: Path) -> None:
     assert config.compact.enabled is True
     assert config.compact.context_window_tokens == 1_000_000
     assert config.compact.keep_recent_rounds == 8
+    assert config.rag.auto_index_on_startup is False
+    assert config.rag.dynamic_tools_enabled is False
+    assert config.rag.retrieval.parent_skill_top_k == 3
+    assert config.rag.context_synthesizer.enabled is True
 
 
 def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
@@ -55,6 +59,16 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
               max_retry: 5
               watch_paths:
                 - ./runtime/logs
+            rag:
+              auto_index_on_startup: true
+              dynamic_tools_enabled: true
+              module_aliases:
+                com.example.order: order
+              retrieval:
+                bm25_weight: 2.0
+                parent_skill_top_k: 4
+              context_synthesizer:
+                enabled: false
             """
         ).strip(),
         encoding="utf-8",
@@ -79,3 +93,9 @@ def test_load_config_reads_yaml_values(tmp_path: Path) -> None:
     assert config.session.db_path == "/tmp/sessions/agent.db"
     assert config.agent.max_retry == 5
     assert config.agent.watch_paths == ["./runtime/logs"]
+    assert config.rag.auto_index_on_startup is True
+    assert config.rag.dynamic_tools_enabled is True
+    assert config.rag.module_aliases == {"com.example.order": "order"}
+    assert config.rag.retrieval.bm25_weight == 2.0
+    assert config.rag.retrieval.parent_skill_top_k == 4
+    assert config.rag.context_synthesizer.enabled is False

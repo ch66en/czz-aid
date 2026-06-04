@@ -78,6 +78,7 @@ class OpenAICompatibleClient:
         response_format: dict[str, Any] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         max_tokens: int | None = None,
+        persist_call_record: bool = True,
     ) -> ToolResult:
         """向兼容接口模型发起聊天请求，主 LLM 失败时自动尝试备用 LLM。"""
         start = time.perf_counter()
@@ -94,8 +95,24 @@ class OpenAICompatibleClient:
                 response = self.fallback_client.chat.completions.create(**fallback_kwargs)
             except Exception as fallback_exc:
                 return self._failure_result(fallback_model, messages, tools, start, fallback_exc)
-            return self._success_result(fallback_model, messages, tools, response, start, fallback_used=True)
-        return self._success_result(model, messages, tools, response, start, fallback_used=False)
+            return self._success_result(
+                fallback_model,
+                messages,
+                tools,
+                response,
+                start,
+                fallback_used=True,
+                persist_call_record=persist_call_record,
+            )
+        return self._success_result(
+            model,
+            messages,
+            tools,
+            response,
+            start,
+            fallback_used=False,
+            persist_call_record=persist_call_record,
+        )
 
     def _build_request_kwargs(
         self,
@@ -153,6 +170,7 @@ class OpenAICompatibleClient:
         response: Any,
         start: float,
         fallback_used: bool,
+        persist_call_record: bool,
     ) -> ToolResult:
         """构造调用成功的 ToolResult 并持久化日志。"""
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -162,7 +180,7 @@ class OpenAICompatibleClient:
         tool_calls = self._extract_tool_calls(message)
         summary = f"model={model}, messages={len(messages)}, tools={len(tools or [])}"
         token_usage = getattr(response, "usage", None).model_dump() if getattr(response, "usage", None) else None
-        if self.config.agent.debug:
+        if self.config.agent.debug and persist_call_record:
             raw_input = self.sanitizer.sanitize(json.dumps(messages, ensure_ascii=False, indent=2, default=str))
             raw_output = self.sanitizer.sanitize(json.dumps({"content": content, "tool_calls": tool_calls}, ensure_ascii=False, default=str))
         else:
@@ -175,14 +193,24 @@ class OpenAICompatibleClient:
             token_usage=token_usage,
             latency_ms=latency_ms,
         )
-        artifact_path = self._persist_call_record(model=model, messages=messages, tools=tools, content=content, tool_calls=tool_calls, token_usage=token_usage, latency_ms=latency_ms)
+        artifact_path = None
+        if persist_call_record:
+            artifact_path = self._persist_call_record(
+                model=model,
+                messages=messages,
+                tools=tools,
+                content=content,
+                tool_calls=tool_calls,
+                token_usage=token_usage,
+                latency_ms=latency_ms,
+            )
         self.records.append(record)
         data: dict[str, Any] = {
             "model": model,
             "summary": record.summary,
             "content": content,
             "tool_calls": tool_calls,
-            "artifact_path": str(artifact_path),
+            "artifact_path": str(artifact_path) if artifact_path is not None else "",
             # 将 usage 同时放入返回值，压缩器无需读取客户端内部 records。
             "token_usage": token_usage,
         }
@@ -195,7 +223,7 @@ class OpenAICompatibleClient:
             stdout_summary=content[:2000],
             stderr_summary="",
             data=data,
-            artifacts=[str(artifact_path)],
+            artifacts=[str(artifact_path)] if artifact_path is not None else [],
         )
 
     def _persist_call_record(

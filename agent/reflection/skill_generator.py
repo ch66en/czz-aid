@@ -26,10 +26,27 @@ class SkillArtifact:
 class SkillGenerator:
     """把总结内容转成 skill markdown 和 metadata。"""
 
-    def build(self, *, name: str, description: str, source_bug_id: str, body: str, skill_dir: Path) -> SkillArtifact:
+    def build(
+        self,
+        *,
+        name: str,
+        description: str,
+        source_bug_id: str,
+        body: str,
+        skill_dir: Path,
+        metadata: dict[str, Any] | None = None,
+    ) -> SkillArtifact:
         """构造 skill 产物。"""
         skill_dir.mkdir(parents=True, exist_ok=True)
-        meta = SkillMeta(name=name, description=description, source_bug_id=source_bug_id, created_at=datetime.utcnow())
+        meta = SkillMeta.model_validate(
+            {
+                **(metadata or {}),
+                "name": name,
+                "description": description,
+                "source_bug_id": source_bug_id,
+                "created_at": datetime.utcnow(),
+            }
+        )
         sections = self._sections(body)
         markdown = self._render_markdown(name, source_bug_id, sections)
         markdown_path = skill_dir / "SKILL.md"
