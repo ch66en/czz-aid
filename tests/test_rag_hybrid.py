@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent.config import RagRetrievalConfig
+from agent.config import RagRerankConfig, RagRetrievalConfig
 from agent.models import BugEvent, StackFrame
 from agent.rag.embedder import DeterministicEmbeddingProvider
 from agent.rag.hybrid_retriever import HybridRetriever
@@ -11,7 +11,21 @@ from agent.rag.repair_context_resolver import RepairContextResolver
 from agent.rag.repair_query_builder import RepairQueryBuilder
 
 
-def _result(name: str, score: float, *, doc_id: str | None = None, doc_type: str = "skill", module: str = "") -> RetrievalResult:
+def _result(
+    name: str,
+    score: float,
+    *,
+    doc_id: str | None = None,
+    doc_type: str = "skill",
+    module: str = "",
+    skill_type: str = "",
+    use_types: list[str] | None = None,
+) -> RetrievalResult:
+    metadata = {"child_type": name}
+    if skill_type:
+        metadata["skill_type"] = skill_type
+    if use_types is not None:
+        metadata["use_types"] = use_types
     return RetrievalResult(
         chunk_id=f"chunk:{name}",
         doc_id=doc_id or f"doc:{name}",
@@ -22,7 +36,7 @@ def _result(name: str, score: float, *, doc_id: str | None = None, doc_type: str
         title=name,
         content=name,
         score=score,
-        metadata={"child_type": name},
+        metadata=metadata,
     )
 
 
@@ -45,6 +59,24 @@ class FakeStore:
 
     def get_document(self, doc_id):
         return None
+
+
+class FakeReranker:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[dict[str, object]] = []
+
+    def rerank(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.fail:
+            raise RuntimeError("Authorization: Bearer secret-token api_key=secret-key")
+        results = []
+        for index, item in enumerate(kwargs["candidates"]):
+            copied = item.model_copy(deep=True)
+            copied.metadata["rerank_query_type"] = kwargs["query_type"]
+            copied.score = 1.0 - (index * 0.01)
+            results.append(copied)
+        return results
 
 
 def test_context_resolver_extracts_symbols_without_treating_fqcn_as_module() -> None:
@@ -82,6 +114,9 @@ def test_query_builder_keeps_java_symbols_for_bm25() -> None:
 
     assert "java.lang.NullPointerException" in query.skill_bm25_query
     assert "OrderService#createOrder" in query.skill_bm25_query
+    assert "successful repair" in query.passed_skill_bm25_query
+    assert "failed repair" in query.failed_skill_bm25_query
+    assert "validation test" in query.validation_skill_bm25_query
 
 
 def test_weighted_rrf_uses_rank_not_raw_score() -> None:
@@ -133,3 +168,59 @@ def test_retrieval_failures_degrade_independently_and_total_failure_is_visible()
     assert results == []
     assert set(status.degraded_stages) == {"bm25", "vector"}
     assert set(status.fallback_strategies) == {"vector_only", "bm25_only"}
+
+
+def test_retrieve_skill_buckets_calls_rerank_for_each_bucket() -> None:
+    reranker = FakeReranker()
+    retriever = HybridRetriever(
+        FakeStore(
+            bm25=[
+                _result("passed", 1.0, doc_id="doc:passed", skill_type="review_passed"),
+                _result("failed", 0.9, doc_id="doc:failed", skill_type="review_failed"),
+                _result("validation_chunk", 0.8, doc_id="doc:validation", skill_type="review_passed", use_types=["validation_hint"]),
+            ]
+        ),
+        DeterministicEmbeddingProvider(),
+        RagRetrievalConfig(),
+        rerank_config=RagRerankConfig(),
+        reranker=reranker,  # type: ignore[arg-type]
+    )  # type: ignore[arg-type]
+    query = RepairRagQuery(
+        project="demo",
+        skill_bm25_query="legacy",
+        skill_vector_query="legacy",
+        passed_skill_bm25_query="passed",
+        passed_skill_vector_query="passed",
+        failed_skill_bm25_query="failed",
+        failed_skill_vector_query="failed",
+        validation_skill_bm25_query="validation",
+        validation_skill_vector_query="validation",
+    )
+
+    buckets = retriever.retrieve_skill_buckets(query, RagStatus())
+
+    assert set(buckets) == {"passed", "failed", "validation"}
+    assert [call["query_type"] for call in reranker.calls] == ["passed_skill", "failed_skill", "validation_skill"]
+
+
+def test_project_doc_rerank_failure_degrades_without_leaking_secrets() -> None:
+    status = RagStatus()
+    retriever = HybridRetriever(
+        FakeStore(bm25=[_result("doc", 1.0, doc_type="api_doc")]),
+        DeterministicEmbeddingProvider(),
+        RagRetrievalConfig(),
+        rerank_config=RagRerankConfig(),
+        reranker=FakeReranker(fail=True),  # type: ignore[arg-type]
+    )  # type: ignore[arg-type]
+
+    selected = retriever.retrieve_project_docs(
+        RepairRagQuery(project="demo", project_doc_bm25_query="x", project_doc_vector_query="x"),
+        status,
+    )
+
+    assert selected
+    assert "project_doc_rerank" in status.degraded_stages
+    assert "rrf_without_rerank" in status.fallback_strategies
+    reason = " ".join(status.reasons)
+    assert "secret-token" not in reason
+    assert "secret-key" not in reason

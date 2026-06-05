@@ -138,6 +138,36 @@ class RagContextSynthesizerConfig(BaseModel):
     max_output_tokens: int = 4000
 
 
+class RagRerankConfig(BaseModel):
+    """Configure optional Qwen rerank after hybrid RRF recall."""
+
+    enabled: bool = True
+    provider: str = "qwen_openai_compatible"
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1"
+    api_key: str = ""
+    model: str = "qwen3-rerank"
+    timeout_seconds: int = 30
+    top_n: int = 30
+    skill_min_score: float = 0.20
+    project_doc_min_score: float = 0.25
+    skill_min_keep: int = 1
+    project_doc_min_keep: int = 1
+    passed_skill_quota: int = 2
+    failed_skill_quota: int = 2
+    validation_skill_quota: int = 1
+    project_doc_quota: int = 5
+    document_max_chars: int = 2000
+    skill_instruct: str = (
+        "Given a Java repair bug query, rank historical repair skills by usefulness "
+        "for diagnosing and fixing the bug."
+    )
+    project_doc_instruct: str = (
+        "Given a Java repair bug query, rank project documents by whether they contain "
+        "current business constraints, API rules, database rules, or validation requirements "
+        "relevant to the bug."
+    )
+
+
 class RagConfig(BaseModel):
     """Configure local RAG indexing and retrieval."""
 
@@ -154,9 +184,11 @@ class RagConfig(BaseModel):
     embedding_base_url: str = ""
     embedding_api_key: str = ""
     embedding_model: str = ""
+    embedding_dimensions: int = 1024
 
     module_aliases: dict[str, str] = Field(default_factory=dict)
     retrieval: RagRetrievalConfig = Field(default_factory=RagRetrievalConfig)
+    rerank: RagRerankConfig = Field(default_factory=RagRerankConfig)
     context_synthesizer: RagContextSynthesizerConfig = Field(default_factory=RagContextSynthesizerConfig)
 
 

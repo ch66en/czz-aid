@@ -95,6 +95,17 @@ class ContextSynthesizer:
                 context_item.confidence = "low" if item.metadata.get("authority") == "unclassified" else "medium"
                 context.soft_hints.append(context_item)
         for item in skills:
+            bucket = str(item.metadata.get("rag_bucket") or "")
+            if bucket == "failed_skill":
+                context.avoid_patterns.append(self._item(item, use_type="avoid_pattern"))
+                continue
+            if bucket == "validation_skill":
+                context.validation_hints.append(self._item(item, use_type="validation_hint"))
+                continue
+            if bucket == "passed_skill":
+                context.soft_hints.append(self._item(item, use_type="recommended_fix"))
+                continue
+
             skill_type = str(item.metadata.get("skill_type") or "legacy_unclassified")
             use_types = [str(value) for value in item.metadata.get("use_types", [])] if isinstance(item.metadata.get("use_types"), list) else []
             if skill_type == "review_passed":

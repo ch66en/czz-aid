@@ -8,10 +8,12 @@ from agent.rag.context_synthesizer import ContextSynthesizer
 from agent.rag.models import RagStatus, RepairRagQuery, RetrievalResult
 
 
-def _candidate(name: str, *, doc_type: str, authority: str = "", skill_type: str = "") -> RetrievalResult:
+def _candidate(name: str, *, doc_type: str, authority: str = "", skill_type: str = "", rag_bucket: str = "") -> RetrievalResult:
     metadata = {"authority": authority} if authority else {}
     if skill_type:
         metadata.update({"skill_type": skill_type, "use_types": ["recommended_fix", "validation_hint"]})
+    if rag_bucket:
+        metadata["rag_bucket"] = rag_bucket
     return RetrievalResult(
         chunk_id=f"chunk:{name}",
         doc_id=f"doc:{name}",
@@ -56,6 +58,19 @@ def test_review_failed_skill_is_avoid_pattern_not_recommended_fix() -> None:
 
     assert context.soft_hints == []
     assert context.avoid_patterns[0].use_type == "avoid_pattern"
+
+
+def test_rag_bucket_overrides_skill_type_in_deterministic_fallback() -> None:
+    synthesizer = ContextSynthesizer(RagContextSynthesizerConfig(enabled=False))
+    passed = _candidate("passed", doc_type="skill", skill_type="review_failed", rag_bucket="passed_skill")
+    failed = _candidate("failed", doc_type="skill", skill_type="review_passed", rag_bucket="failed_skill")
+    validation = _candidate("validation", doc_type="skill", skill_type="review_passed", rag_bucket="validation_skill")
+
+    context = synthesizer.deterministic_fallback(RepairRagQuery(project="demo"), [passed, failed, validation], [])
+
+    assert [item.source.doc_id for item in context.soft_hints] == ["doc:passed"]
+    assert [item.source.doc_id for item in context.avoid_patterns] == ["doc:failed"]
+    assert [item.source.doc_id for item in context.validation_hints] == ["doc:validation"]
 
 
 def test_synthesizer_rejects_unknown_sources_and_does_not_persist_candidates() -> None:

@@ -66,10 +66,14 @@ rag:
   dynamic_tools_enabled: false
   debug_candidate_logging: false
 
-  embedding_provider: fallback
-  embedding_base_url: ""
+  embedding_provider: openai_compatible
+  embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   embedding_api_key: ""
-  embedding_model: ""
+  embedding_model: "text-embedding-v4"
+  embedding_dimensions: 1024
+
+  # 注意：embedding_base_url 与 rerank.base_url 不要合并。
+  # DashScope embedding 使用 compatible-mode/v1，rerank 使用 compatible-api/v1。
 
   module_aliases:
     "com.example.order": order
@@ -85,6 +89,26 @@ rag:
     project_doc_final_top_k: 5
     candidate_top_n: 15
     per_doc_chunk_cap: 2
+
+  rerank:
+    enabled: true
+    provider: qwen_openai_compatible
+    base_url: "https://dashscope.aliyuncs.com/compatible-api/v1"
+    api_key: ""
+    model: "qwen3-rerank"
+    timeout_seconds: 30
+    top_n: 30
+    skill_min_score: 0.20
+    project_doc_min_score: 0.25
+    skill_min_keep: 1
+    project_doc_min_keep: 1
+    passed_skill_quota: 2
+    failed_skill_quota: 2
+    validation_skill_quota: 1
+    project_doc_quota: 5
+    document_max_chars: 2000
+    skill_instruct: "Given a Java repair bug query, rank historical repair skills by usefulness for diagnosing and fixing the bug."
+    project_doc_instruct: "Given a Java repair bug query, rank project documents by whether they contain current business constraints, API rules, database rules, or validation requirements relevant to the bug."
 
   context_synthesizer:
     enabled: true

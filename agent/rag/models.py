@@ -76,6 +76,12 @@ class RepairRagQuery(BaseModel):
     root_cause_hint: str = ""
     skill_bm25_query: str = ""
     skill_vector_query: str = ""
+    passed_skill_bm25_query: str = ""
+    passed_skill_vector_query: str = ""
+    failed_skill_bm25_query: str = ""
+    failed_skill_vector_query: str = ""
+    validation_skill_bm25_query: str = ""
+    validation_skill_vector_query: str = ""
     project_doc_bm25_query: str = ""
     project_doc_vector_query: str = ""
 

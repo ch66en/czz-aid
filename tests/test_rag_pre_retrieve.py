@@ -6,6 +6,22 @@ from pathlib import Path
 from agent.config import AppConfig
 from agent.models import BugEvent, StackFrame
 from agent.rag.knowledge_service import KnowledgeService
+from agent.rag.models import RetrievalResult
+
+
+def _result(name: str, *, doc_id: str | None = None, doc_type: str = "skill", score: float = 1.0) -> RetrievalResult:
+    return RetrievalResult(
+        chunk_id=f"chunk:{name}",
+        doc_id=doc_id or f"doc:{name}",
+        parent_id=doc_id or f"doc:{name}" if doc_type == "skill" else "",
+        source="skill" if doc_type == "skill" else "local_doc",
+        doc_type=doc_type,
+        project="demo",
+        title=name,
+        content=name,
+        score=score,
+        metadata={"authority": "approved"} if doc_type != "skill" else {},
+    )
 
 
 def test_pre_retrieve_builds_structured_context_from_indexed_knowledge(tmp_path: Path) -> None:
@@ -58,7 +74,7 @@ def test_pre_retrieve_builds_structured_context_from_indexed_knowledge(tmp_path:
 
     assert context.hard_constraints
     assert context.soft_hints
-    assert context.validation_hints
+    assert context.avoid_patterns == []
     assert status.candidate_count >= 2
     assert status.selected_source_count >= 2
     assert "context_synthesizer" in status.degraded_stages
@@ -83,3 +99,41 @@ def test_total_rag_failure_returns_empty_context_and_failed_status(tmp_path: Pat
     assert context.selected_sources == []
     assert status.status == "failed"
     assert set(status.degraded_stages) >= {"skill_retrieval", "project_doc_retrieval"}
+
+
+def test_pre_retrieve_merges_skill_buckets_by_priority_and_quota(tmp_path: Path) -> None:
+    config = AppConfig(
+        project={"name": "demo"},
+        rag={
+            "db_path": str(tmp_path / "rag.db"),
+            "rerank": {
+                "failed_skill_quota": 1,
+                "passed_skill_quota": 1,
+                "validation_skill_quota": 1,
+                "project_doc_quota": 1,
+            },
+        },
+    )
+    service = KnowledgeService(config=config)
+
+    class BucketHybrid:
+        def retrieve_skill_buckets(self, query, status):
+            return {
+                "failed": [_result("same-failed", doc_id="doc:same"), _result("failed-extra", doc_id="doc:failed-extra")],
+                "passed": [_result("same-passed", doc_id="doc:same"), _result("passed-extra", doc_id="doc:passed-extra")],
+                "validation": [_result("validation", doc_id="doc:validation")],
+            }
+
+        def retrieve_project_docs(self, query, status):
+            return [_result("approved-doc", doc_id="doc:approved", doc_type="api_doc")]
+
+    service.hybrid_retriever = BucketHybrid()  # type: ignore[assignment]
+    bug = BugEvent(bug_id="B", source="log", project="demo", title="", exception_type="E", message="m", fingerprint="fp")
+
+    context, status = service.pre_retrieve_for_bug(bug, {})
+
+    assert status.candidate_count == 4
+    assert [item.source.doc_id for item in context.avoid_patterns] == ["doc:same"]
+    assert [item.source.doc_id for item in context.soft_hints] == ["doc:passed-extra"]
+    assert [item.source.doc_id for item in context.validation_hints] == ["doc:validation"]
+    assert [item.source.doc_id for item in context.hard_constraints] == ["doc:approved"]

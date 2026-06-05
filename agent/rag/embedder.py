@@ -5,7 +5,7 @@ from __future__ import annotations
 from hashlib import sha256
 import math
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from openai import OpenAI
 
@@ -49,17 +49,30 @@ class DeterministicEmbeddingProvider:
 class OpenAICompatibleEmbeddingProvider:
     """OpenAI-compatible embedding provider, enabled only when configured."""
 
-    def __init__(self, *, api_key: str, base_url: str, model: str, timeout_seconds: int = 60) -> None:
+    def __init__(self, *, api_key: str, base_url: str, model: str, timeout_seconds: int = 60, dimensions: int = 0) -> None:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.dimensions = dimensions
 
     def embed(self, text: str) -> list[float]:
         return self.embed_batch([text])[0]
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        response = self.client.embeddings.create(model=self.model, input=texts, timeout=self.timeout_seconds)
-        return [list(item.embedding) for item in response.data]
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "input": texts,
+            "timeout": self.timeout_seconds,
+        }
+        if self.dimensions > 0:
+            kwargs["dimensions"] = self.dimensions
+        response = self.client.embeddings.create(**kwargs)
+        embeddings = [list(item.embedding) for item in response.data]
+        if self.dimensions > 0:
+            for embedding in embeddings:
+                if len(embedding) != self.dimensions:
+                    raise ValueError(f"Embedding dimension mismatch: expected {self.dimensions}, got {len(embedding)}")
+        return embeddings
 
 
 def build_embedding_provider(config: AppConfig) -> EmbeddingProvider:
@@ -68,5 +81,11 @@ def build_embedding_provider(config: AppConfig) -> EmbeddingProvider:
     base_url = config.rag.embedding_base_url.strip() or config.llm.base_url.strip()
     model = config.rag.embedding_model.strip()
     if provider == "openai_compatible" and api_key and model:
-        return OpenAICompatibleEmbeddingProvider(api_key=api_key, base_url=base_url, model=model, timeout_seconds=config.llm.timeout_seconds)
+        return OpenAICompatibleEmbeddingProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout_seconds=config.llm.timeout_seconds,
+            dimensions=config.rag.embedding_dimensions,
+        )
     return DeterministicEmbeddingProvider()

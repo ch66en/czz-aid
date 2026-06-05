@@ -18,6 +18,7 @@ from agent.rag.local_doc_loader import LOCAL_DOC_TYPES, LocalDocLoader
 from agent.rag.models import RagRepairContext, RagStatus, RetrievalResult
 from agent.rag.repair_context_resolver import RepairContextResolver
 from agent.rag.repair_query_builder import RepairQueryBuilder
+from agent.rag.reranker import build_reranker_provider
 from agent.rag.retriever import Retriever
 from agent.rag.skill_chunker import SkillChunker
 from agent.rag.skill_loader import SkillLoader
@@ -59,7 +60,14 @@ class KnowledgeService:
         self.retriever = retriever or Retriever(self.vector_store, self.embedder)
         self.context_resolver = RepairContextResolver(config.rag.module_aliases)
         self.query_builder = RepairQueryBuilder()
-        self.hybrid_retriever = HybridRetriever(self.vector_store, self.embedder, config.rag.retrieval)
+        self.reranker = build_reranker_provider(config)
+        self.hybrid_retriever = HybridRetriever(
+            self.vector_store,
+            self.embedder,
+            config.rag.retrieval,
+            rerank_config=config.rag.rerank,
+            reranker=self.reranker,
+        )
         self.context_synthesizer = context_synthesizer or ContextSynthesizer(config.rag.context_synthesizer)
 
     def index_skills(self) -> int:
@@ -111,20 +119,25 @@ class KnowledgeService:
                 fallback_strategies=["empty_rag_context"],
             )
         try:
-            skills = self.hybrid_retriever.retrieve_skills(query, status)
+            skill_buckets = self.hybrid_retriever.retrieve_skill_buckets(query, status)
         except Exception as exc:
-            skills = []
+            skill_buckets = {"passed": [], "failed": [], "validation": []}
             self._degrade(status, "skill_retrieval", exc, "project_docs_only")
         try:
             project_docs = self.hybrid_retriever.retrieve_project_docs(query, status)
         except Exception as exc:
             project_docs = []
             self._degrade(status, "project_doc_retrieval", exc, "skills_only")
-        candidates = sorted([*skills, *project_docs], key=lambda item: item.score, reverse=True)[: self.config.rag.retrieval.candidate_top_n]
-        selected_skill_ids = {item.doc_id for item in skills}
-        selected_doc_chunks = {item.chunk_id for item in project_docs}
-        skills = [item for item in candidates if item.doc_id in selected_skill_ids and item.doc_type == "skill"]
-        project_docs = [item for item in candidates if item.chunk_id in selected_doc_chunks and item.doc_type != "skill"]
+        skills = self._merge_skill_buckets(
+            failed=skill_buckets.get("failed", []),
+            passed=skill_buckets.get("passed", []),
+            validation=skill_buckets.get("validation", []),
+        )
+        project_docs = self._mark_bucket(
+            project_docs[: self.config.rag.rerank.project_doc_quota],
+            "project_doc",
+        )
+        candidates = [*skills, *project_docs]
         status.candidate_count = len(candidates)
         if any(item.metadata.get("skill_type") == "legacy_unclassified" for item in skills):
             self._degrade(status, "skill_metadata", ValueError("legacy_unclassified Skill selected"), "debug_hint_only")
@@ -268,3 +281,37 @@ class KnowledgeService:
         status.reasons.append(self._safe_error(exc)[:240])
         if fallback not in status.fallback_strategies:
             status.fallback_strategies.append(fallback)
+
+    def _merge_skill_buckets(
+        self,
+        *,
+        failed: list[RetrievalResult],
+        passed: list[RetrievalResult],
+        validation: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        selected: list[RetrievalResult] = []
+        seen_doc_ids: set[str] = set()
+
+        def add_bucket(results: list[RetrievalResult], bucket: str, quota: int) -> None:
+            added = 0
+            for item in results:
+                if added >= quota:
+                    break
+                if item.doc_id in seen_doc_ids:
+                    continue
+                selected.extend(self._mark_bucket([item], bucket))
+                seen_doc_ids.add(item.doc_id)
+                added += 1
+
+        add_bucket(failed, "failed_skill", self.config.rag.rerank.failed_skill_quota)
+        add_bucket(passed, "passed_skill", self.config.rag.rerank.passed_skill_quota)
+        add_bucket(validation, "validation_skill", self.config.rag.rerank.validation_skill_quota)
+        return selected
+
+    def _mark_bucket(self, results: list[RetrievalResult], bucket: str) -> list[RetrievalResult]:
+        marked: list[RetrievalResult] = []
+        for item in results:
+            copied = item.model_copy(deep=True)
+            copied.metadata["rag_bucket"] = bucket
+            marked.append(copied)
+        return marked
